@@ -48,14 +48,14 @@ class CastAdvertiser:
         # Chromecast mDNS TXT record properties
         # Reference: https://developers.google.com/cast/docs/developers
         properties = {
-            "id": self.device_id,
-            "cd": self.device_id[:8],
+            "id": self.device_id.lower(),  # must be lowercase
+            "cd": self.device_id[:8].lower(),
             "rm": "",
             "ve": "05",  # version
             "md": self.device_model,
             "ic": "/setup/icon.png",
             "fn": self.friendly_name,
-            "ca": "233637",  # capabilities bitmask
+            "ca": "4101",   # capabilities: video + audio
             "st": "0",  # idle status
             "bs": "000000000000",
             "nf": "1",
@@ -73,7 +73,7 @@ class CastAdvertiser:
             server=hostname,
         )
 
-        self.zeroconf = Zeroconf()
+        self.zeroconf = Zeroconf(interfaces=[local_ip])
         self.zeroconf.register_service(self.service_info, allow_name_change=True)
 
         log.info("=" * 60)

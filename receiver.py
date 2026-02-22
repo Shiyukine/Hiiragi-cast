@@ -42,19 +42,24 @@ NS_HEARTBEAT = "urn:x-cast:com.google.cast.tp.heartbeat"
 NS_RECEIVER = "urn:x-cast:com.google.cast.receiver"
 NS_AUTH = "urn:x-cast:com.google.cast.tp.deviceauth"
 NS_MEDIA = "urn:x-cast:com.google.cast.media"
+NS_YOUTUBE = "urn:x-cast:com.google.youtube.mdx"
+NS_SETUP = "urn:x-cast:com.google.cast.setup"
+NS_DISCOVERY = "urn:x-cast:com.google.cast.receiver.discovery"
 
 
 class CastReceiver:
     """Minimal Cast V2 receiver with TLS authentication."""
 
     def __init__(self, cert_file, key_file, peer_cert_file=None, port=8009,
-                 auth_crt_file=None, signatures_file=None):
+                 auth_crt_file=None, signatures_file=None, media_bridge=None,
+                 friendly_name="CastTest", device_id=None):
         self.cert_file = cert_file
         self.key_file = key_file
         self.peer_cert_file = peer_cert_file
         self.auth_crt_file = auth_crt_file
         self.signatures_file = signatures_file
         self.port = port
+        self.friendly_name = friendly_name
         self.running = False
         self.clients = {}
 
@@ -127,6 +132,19 @@ class CastReceiver:
         self.media_session_id = 0
         self.media_status = None   # dict or None when idle
         self.media_transport_id = None  # transportId of the active app session
+
+        # Optional Electron media bridge
+        self.bridge = media_bridge
+
+        # Stable device ID — must match the mDNS `id` TXT record exactly
+        # so the phone can correlate eureka_info / DEVICE_INFO with the mDNS entry.
+        import hashlib as _hl, uuid as _uuid
+        self.device_id = (device_id or
+                          _hl.md5((friendly_name + str(_uuid.getnode())).encode())
+                          .hexdigest().upper())
+
+        # YouTube MDX state
+        self.yt_video_id = None  # currently loaded YouTube video ID
 
         log.info("Loaded certificate: %s", self.cert.subject)
         log.info("Certificate fingerprint (SHA256): %s",
@@ -303,6 +321,18 @@ class CastReceiver:
             payload = json.loads(msg.payload_utf8)
             log.info("[%s] << MEDIA: %s", client_id, payload.get("type"))
             self._handle_media(sock, msg, payload)
+        elif ns == NS_YOUTUBE:
+            payload = json.loads(msg.payload_utf8)
+            log.info("[%s] << YOUTUBE: %s", client_id, payload.get("type"))
+            self._handle_youtube(sock, msg, payload)
+        elif ns == NS_SETUP:
+            payload = json.loads(msg.payload_utf8)
+            log.info("[%s] << SETUP: %s", client_id, payload.get("type"))
+            self._handle_setup(sock, msg, payload)
+        elif ns == NS_DISCOVERY:
+            payload = json.loads(msg.payload_utf8)
+            log.info("[%s] << DISCOVERY: %s", client_id, payload.get("type"))
+            self._handle_discovery(sock, msg, payload)
         else:
             log.info("[%s] << UNKNOWN ns=%s", client_id, ns)
             if msg.payload_type == cast_channel_pb2.STRING:
@@ -452,12 +482,17 @@ class CastReceiver:
             transport_id = "web-" + hashlib.md5(os.urandom(8)).hexdigest()[:6]
             self.media_transport_id = transport_id
             self.media_status = None  # reset media on new launch
+            self.yt_video_id = None   # reset YouTube state on new launch
             self.applications = [{
                 "appId": app_id,
                 "displayName": self._app_display_name(app_id),
                 "isIdleScreen": False,
                 "launchedFromCloud": False,
                 "namespaces": [
+                    {"name": NS_MEDIA},
+                    {"name": NS_YOUTUBE},
+                    {"name": "urn:x-cast:com.google.cast.cac"},
+                ] if app_id == "233637DE" else [
                     {"name": NS_MEDIA},
                     {"name": "urn:x-cast:com.google.cast.cac"},
                 ],
@@ -558,18 +593,24 @@ class CastReceiver:
             log.info("  LOAD: contentId=%s type=%s",
                      media.get("contentId", ""), media.get("contentType", ""))
             self._send_media_status(sock, msg.source_id, transport_id, request_id)
+            if self.bridge:
+                self.bridge.on_load(media, current_time)
 
         elif msg_type == "PLAY":
             if self.media_status:
                 self.media_status["playerState"] = "PLAYING"
                 self.media_status["idleReason"] = None
             self._send_media_status(sock, msg.source_id, transport_id, request_id)
+            if self.bridge:
+                self.bridge.on_play()
             log.info("  >> PLAY")
 
         elif msg_type == "PAUSE":
             if self.media_status:
                 self.media_status["playerState"] = "PAUSED"
             self._send_media_status(sock, msg.source_id, transport_id, request_id)
+            if self.bridge:
+                self.bridge.on_pause()
             log.info("  >> PAUSE")
 
         elif msg_type == "SEEK":
@@ -577,6 +618,8 @@ class CastReceiver:
             if self.media_status:
                 self.media_status["currentTime"] = current_time
             self._send_media_status(sock, msg.source_id, transport_id, request_id)
+            if self.bridge:
+                self.bridge.on_seek(current_time)
             log.info("  >> SEEK to %.1fs", current_time)
 
         elif msg_type == "STOP":
@@ -585,6 +628,8 @@ class CastReceiver:
                 self.media_status["idleReason"] = "CANCELLED"
             self._send_media_status(sock, msg.source_id, transport_id, request_id)
             self.media_status = None
+            if self.bridge:
+                self.bridge.on_stop()
             log.info("  >> MEDIA STOP")
 
         elif msg_type == "SET_VOLUME":
@@ -595,27 +640,36 @@ class CastReceiver:
                 if "muted" in vol:
                     self.media_status["volume"]["muted"] = vol["muted"]
             self._send_media_status(sock, msg.source_id, transport_id, request_id)
+            if self.bridge:
+                mv = self.media_status["volume"] if self.media_status else {}
+                self.bridge.on_volume(mv.get("level", 1.0), mv.get("muted", False))
             log.info("  >> MEDIA SET_VOLUME")
 
         elif msg_type == "QUEUE_LOAD":
             items = payload.get("items", [])
             log.info("  QUEUE_LOAD: %d items", len(items))
             if items:
-                media = items[0].get("media", {})
+                item = items[0]
+                media = item.get("media", {})
+                start_time = item.get("startTime", 0)
                 self.media_session_id += 1
                 self.media_transport_id = transport_id
                 self.media_status = {
                     "mediaSessionId": self.media_session_id,
                     "playbackRate": 1,
                     "playerState": "PLAYING",
-                    "currentTime": 0,
+                    "currentTime": start_time,
                     "supportedMediaCommands": 274447,
                     "volume": {"level": 1.0, "muted": False},
                     "media": media,
-                    "currentItemId": items[0].get("itemId", 1),
+                    "currentItemId": item.get("itemId", 1),
                     "repeatMode": payload.get("repeatMode", "REPEAT_OFF"),
                     "idleReason": None,
                 }
+                log.info("  QUEUE_LOAD: contentId=%s type=%s",
+                         media.get("contentId", ""), media.get("contentType", ""))
+                if self.bridge:
+                    self.bridge.on_load(media, start_time)
             self._send_media_status(sock, msg.source_id, transport_id, request_id)
 
         elif msg_type == "QUEUE_INSERT":
@@ -628,6 +682,18 @@ class CastReceiver:
 
         elif msg_type == "QUEUE_NEXT" or msg_type == "QUEUE_PREV":
             log.info("  %s", msg_type)
+            self._send_media_status(sock, msg.source_id, transport_id, request_id)
+
+        elif msg_type == "EDIT_TRACKS_INFO":
+            # Sender is enabling/disabling subtitle or audio tracks.
+            # Store active track IDs and style in media status, then ack.
+            active_ids = payload.get("activeTrackIds", [])
+            track_style = payload.get("textTrackStyle", None)
+            if self.media_status:
+                self.media_status["activeTrackIds"] = active_ids
+                if track_style is not None:
+                    self.media_status["textTrackStyle"] = track_style
+            log.info("  EDIT_TRACKS_INFO: activeTrackIds=%s", active_ids)
             self._send_media_status(sock, msg.source_id, transport_id, request_id)
 
         else:
@@ -667,6 +733,175 @@ class CastReceiver:
             "A9BCCB7C": "VLC",
         }
         return _known.get(app_id, app_id)
+
+    def _handle_discovery(self, sock, msg, payload):
+        """Handle urn:x-cast:com.google.cast.receiver.discovery messages."""
+        msg_type = payload.get("type", "")
+        request_id = payload.get("requestId", 0)
+
+        if msg_type == "GET_DEVICE_INFO":
+            device_info = {
+                "type": "DEVICE_INFO",
+                "requestId": request_id,
+                "deviceInfo": {
+                    "deviceId": self.device_id.lower(),
+                    "friendlyName": self.friendly_name,
+                    "model": "Chromecast",
+                    "productName": "Chromecast",
+                    "manufacturer": "Google Inc.",
+                    "macAddress": "11:22:33:44:55:66",
+                    "releaseTrack": "stable-channel",
+                    "buildVersion": "1.56.330094",
+                    "castBuildRevision": "1.56.330094",
+                    "capabilities": 4101,
+                    "version": 12,
+                    "locale": "en",
+                },
+            }
+            self._send_message(sock, self._build_message(
+                msg.destination_id, msg.source_id, NS_DISCOVERY,
+                payload_utf8=json.dumps(device_info)))
+            log.info("  >> DEVICE_INFO response sent")
+
+    def _device_id(self):
+        return self.device_id
+
+    def _handle_setup(self, sock, msg, payload):
+        """Handle urn:x-cast:com.google.cast.setup messages.
+
+        The Google Home app sends an 'eureka_info' request over the Cast TLS
+        channel asking for device details.  Without a proper response the app
+        shows the device as unresponsive and won't let the user cast to it.
+        """
+        msg_type = payload.get("type", "")
+        request_id = payload.get("request_id", payload.get("requestId", 0))
+
+        if msg_type == "eureka_info":
+            # Build the same JSON as the HTTP /setup/eureka_info endpoint.
+            # The 'data' field in the request tells us which fields are wanted;
+            # we just return everything — the app ignores unknown keys.
+            info = {
+                "bssid": "11:22:33:44:55:66",
+                "build_version": "1.56.330094",
+                "cast_build_revision": "1.56.330094",
+                "connected": True,
+                "ethernet_connected": False,
+                "has_update": False,
+                "locale": "en",
+                "model_name": "Chromecast",
+                "multizone": {"audio_output_delay": 0,
+                               "audio_output_delay_oem": 0,
+                               "aux_in_enabled": False},
+                "name": self.friendly_name,
+                "opt_in": {"crash": False, "opencast": False, "stats": False},
+                "release_track": "stable-channel",
+                "setup_state": 4,
+                "sign": {"certificate": "", "intermediate_certs": [],
+                          "nonce": "", "signed_data": ""},
+                "tos_accepted": True,
+                "version": 12,
+                "uma_client_id": self.device_id.lower(),
+                "uuid": self.device_id.lower(),
+                "wpa_configured": True,
+                "wpa_state": 10,
+                "device_info": {
+                    "manufacturer": "Google Inc.",
+                    "product_name": "Chromecast",
+                    "ssdp_udn": self.device_id.lower(),
+                },
+                "build_info": {
+                    "build_type": 3,
+                    "cast_build_revision": "1.56.330094",
+                },
+            }
+            response = {
+                "type": "eureka_info",
+                "request_id": request_id,
+                "status": "success",
+                "data": info,
+            }
+            self._send_message(sock, self._build_message(
+                msg.destination_id, msg.source_id, NS_SETUP,
+                payload_utf8=json.dumps(response)))
+            log.info("  >> eureka_info response sent")
+
+    def _handle_youtube(self, sock, msg, payload):
+        """Handle YouTube MDX namespace messages (app 233637DE).
+
+        The YouTube sender never uses the standard MEDIA namespace — it sends
+        setState commands on urn:x-cast:com.google.youtube.mdx.  We translate
+        those into bridge calls (which will resolve via yt-dlp in on_load).
+
+        YouTube state values: 1 = playing, 2 = paused, -1 = stopped/unstarted.
+        """
+        msg_type = payload.get("type", "")
+
+        def send_mdx_status(state="idle", video_id="", current_time=0):
+            status = {
+                "type": "mdxSessionStatus",
+                "data": {
+                    "screenId": "hiiragi-cast",
+                    "status": {
+                        "state": state,
+                        "loadedVideoId": video_id or "",
+                        "currentTime": current_time,
+                        "duration": 0,
+                        "muted": False,
+                        "volume": 100,
+                    },
+                },
+            }
+            self._send_message(sock, self._build_message(
+                msg.destination_id, msg.source_id, NS_YOUTUBE,
+                payload_utf8=json.dumps(status)))
+
+        if msg_type in ("getMdxSessionStatus", "register", "nonce"):
+            send_mdx_status()
+
+        elif msg_type == "setState":
+            video_id = payload.get("videoId") or payload.get("videoID", "")
+            state = payload.get("state", -1)        # 1=playing, 2=paused, -1=stopped
+            current_time = float(payload.get("currentTime", 0) or 0)
+
+            if video_id and video_id != self.yt_video_id:
+                # New (or first) video — resolve via yt-dlp in on_load
+                log.info("  YOUTUBE LOAD: videoId=%s", video_id)
+                self.yt_video_id = video_id
+                media = {
+                    "contentId": f"https://www.youtube.com/watch?v={video_id}",
+                    "contentType": "video/mp4",
+                    "metadata": {"title": ""},
+                }
+                if self.bridge:
+                    self.bridge.on_load(media, current_time)
+                send_mdx_status("playing" if state == 1 else "paused",
+                                video_id, current_time)
+
+            elif state == 1:
+                log.info("  YOUTUBE PLAY")
+                if self.bridge:
+                    self.bridge.on_play()
+                send_mdx_status("playing", self.yt_video_id or "", current_time)
+
+            elif state == 2:
+                log.info("  YOUTUBE PAUSE")
+                if self.bridge:
+                    self.bridge.on_pause()
+                send_mdx_status("paused", self.yt_video_id or "", current_time)
+
+            elif state == -1:
+                log.info("  YOUTUBE STOP")
+                self.yt_video_id = None
+                if self.bridge:
+                    self.bridge.on_stop()
+                send_mdx_status("idle")
+
+            elif current_time and not video_id:
+                # Seek-only setState
+                log.info("  YOUTUBE SEEK: %.1f", current_time)
+                if self.bridge:
+                    self.bridge.on_seek(current_time)
+                send_mdx_status("playing", self.yt_video_id or "", current_time)
 
     def _get_receiver_status(self):
         """Build receiver status response."""

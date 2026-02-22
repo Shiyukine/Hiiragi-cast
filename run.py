@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from receiver import CastReceiver
 from mdns_advertiser import CastAdvertiser
 from cert_gen import generate_tls_cert
+from media_bridge import MediaBridge
+from setup_server import CastSetupServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,6 +68,10 @@ Testing:
                         help="Device friendly name (default: CastTest)")
     parser.add_argument("--no-mdns", action="store_true",
                         help="Don't advertise via mDNS")
+    parser.add_argument("--electron", action="store_true",
+                        help="Start the Electron player and stream media events to it")
+    parser.add_argument("--bridge-port", type=int, default=9000,
+                        help="WebSocket port for Electron bridge (default: 9000)")
 
     args = parser.parse_args()
 
@@ -107,12 +113,70 @@ Testing:
     log.info("  Port            : %d", args.port)
     log.info("  Device Name     : %s", args.name)
     log.info("  mDNS            : %s", "disabled" if args.no_mdns else "enabled")
+    log.info("  Electron bridge : %s", f"ws://localhost:{args.bridge_port}" if args.electron else "disabled")
     log.info("=" * 60)
+
+    # Start media bridge (optional Electron player)
+    bridge = None
+    if args.electron:
+        bridge = MediaBridge(port=args.bridge_port)
+        bridge.start()
+        # Launch the Electron app
+        import subprocess, shutil
+        electron_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "electron-player")
+        if os.path.isdir(electron_dir):
+            log.info("Launching Electron player from %s", electron_dir)
+            # On Windows npm/npx are .cmd batch files and cannot be invoked as
+            # plain executables — shell=True is required.
+            subprocess.Popen("npm run start",
+                             cwd=electron_dir,
+                             shell=True,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        else:
+            log.warning("Electron player directory not found: %s", electron_dir)
+            log.warning("Run: cd electron-player && npm install")
+
+    # On Windows, ensure the firewall allows mDNS (UDP 5353) and the Cast port.
+    # This runs silently — no-op on non-Windows or if rules already exist.
+    if sys.platform == "win32" and not args.no_mdns:
+        import subprocess as _sp
+        any_failed = False
+        for _rule, _proto, _port in [
+            ("HiiragiCast-mDNS",   "UDP", "5353"),
+            ("HiiragiCast-Setup",  "TCP", "8008"),
+            ("HiiragiCast-Cast",   "TCP", str(args.port)),
+        ]:
+            r = _sp.run(
+                ["netsh", "advfirewall", "firewall", "add", "rule",
+                 f"name={_rule}", "dir=in", "action=allow",
+                 f"protocol={_proto}", f"localport={_port}"],
+                capture_output=True, check=False,
+            )
+            if r.returncode != 0:
+                any_failed = True
+        if any_failed:
+            log.warning("Could not add Windows Firewall rules — run once as Administrator"
+                        " so mDNS discovery works on all network profiles")
 
     # Start mDNS advertiser
     advertiser = None
     if not args.no_mdns:
         advertiser = CastAdvertiser(args.name, args.port)
+
+        # Setup HTTP server on port 8008 (required by Google Home app on phones)
+        setup_srv = CastSetupServer(
+            friendly_name=args.name,
+            device_id=advertiser.device_id,
+            cast_port=args.port,
+        )
+        try:
+            setup_srv.start()
+        except Exception as e:
+            log.warning("Setup HTTP server failed (non-fatal): %s", e)
+            log.warning("Google Home app on phones may not find this device")
+
         try:
             advertiser.start()
         except Exception as e:
@@ -127,7 +191,10 @@ Testing:
         peer_cert_file=int_path,
         port=args.port,
         auth_crt_file=auth_crt_path,
-        signatures_file=signatures_path
+        signatures_file=signatures_path,
+        media_bridge=bridge,
+        friendly_name=args.name,
+        device_id=advertiser.device_id if advertiser else None,
     )
     try:
         receiver.start()
