@@ -117,7 +117,7 @@ def test_connect(sock):
                  payload_utf8=json.dumps({
                      "type": "CONNECT",
                      "origin": {},
-                     "userAgent": "CastTestClient/1.0",
+                     "userAgent": "HiiragiCastClient/1.0",
                      "senderInfo": {
                          "sdkType": 2,
                          "version": "15.204.0.5",

@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from receiver import CastReceiver
 from mdns_advertiser import CastAdvertiser
-from cert_gen import generate_tls_cert
+from cert_fetch import fetch_certs
 from media_bridge import MediaBridge
 from setup_server import CastSetupServer
 
@@ -29,7 +29,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("CastTest")
+log = logging.getLogger("Hiiragi Cast")
 
 
 def main():
@@ -50,22 +50,24 @@ Testing:
   5. You can also test with: pychromecast or catt CLI tools
         """,
     )
-    parser.add_argument("--cert", default="./tls.pem",
-                        help="TLS certificate (default: ./tls.pem)")
-    parser.add_argument("--key", default="./pk.pem",
-                        help="TLS private key (default: ./pk.pem)")
-    parser.add_argument("--generate-cert", action="store_true",
-                        help="Generate a new TLS certificate dynamically using the provided key")
-    parser.add_argument("--intermediate", default="./intermediate.pem",
-                        help="Intermediate CA certificates (default: ./intermediate.pem)")
-    parser.add_argument("--auth-crt", default="./auth.pem",
-                        help="Google Device Certificate for auth bypass (default: ./auth.pem)")
-    parser.add_argument("--signatures", default="../signatures.txt",
-                        help="Pre-computed signatures for auth bypass (default: ../signatures.txt)")
+    parser.add_argument("--cert", default="./certs/tls.pem",
+                        help="TLS certificate (default: ./certs/tls.pem)")
+    parser.add_argument("--key", default="./certs/pk.pem",
+                        help="TLS private key (default: ./certs/pk.pem)")
+    parser.add_argument("--fetch-certs", action="store_true",
+                        help="Fetch fresh certificates from the remotetogo API")
+    parser.add_argument("--force-fetch", action="store_true",
+                        help="Force re-fetch even if cached certs are still valid")
+    parser.add_argument("--intermediate", default="./certs/intermediate.pem",
+                        help="Intermediate CA certificates (default: ./certs/intermediate.pem)")
+    parser.add_argument("--auth-crt", default="./certs/auth.pem",
+                        help="Google Device Certificate for auth bypass (default: ./certs/auth.pem)")
+    parser.add_argument("--signatures", default="./certs/sig_sha256.bin",
+                        help="Pre-computed SHA-256 signature (default: ./certs/sig_sha256.bin)")
     parser.add_argument("--port", type=int, default=8009,
                         help="Port number (default: 8009)")
-    parser.add_argument("--name", default="CastTest",
-                        help="Device friendly name (default: CastTest)")
+    parser.add_argument("--name", default="Hiiragi Cast",
+                        help="Device friendly name (default: Hiiragi Cast)")
     parser.add_argument("--no-mdns", action="store_true",
                         help="Don't advertise via mDNS")
     parser.add_argument("--electron", action="store_true",
@@ -77,27 +79,41 @@ Testing:
 
     # Resolve paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    cert_path = os.path.join(script_dir, args.cert) if not os.path.isabs(args.cert) else args.cert
-    key_path = os.path.join(script_dir, args.key) if not os.path.isabs(args.key) else args.key
-    int_path = None
-    if args.intermediate:
-        int_path = os.path.join(script_dir, args.intermediate) if not os.path.isabs(args.intermediate) else args.intermediate
-    auth_crt_path = None
-    if args.auth_crt:
-        auth_crt_path = os.path.join(script_dir, args.auth_crt) if not os.path.isabs(args.auth_crt) else args.auth_crt
-    signatures_path = None
-    if args.signatures:
-        signatures_path = os.path.join(script_dir, args.signatures) if not os.path.isabs(args.signatures) else args.signatures
+    certs_dir  = os.path.join(script_dir, "certs")
 
-    # Verify files exist
+    def _abspath(p):
+        return p if os.path.isabs(p) else os.path.join(script_dir, p)
+
+    cert_path       = _abspath(args.cert)
+    key_path        = _abspath(args.key)
+    int_path        = _abspath(args.intermediate) if args.intermediate else None
+    auth_crt_path   = _abspath(args.auth_crt)     if args.auth_crt     else None
+    signatures_path = _abspath(args.signatures)   if args.signatures   else None
+
+    # ── Fetch / refresh certificates ──────────────────────────────────────────
+    # Auto-fetch when any required cert file is missing, or when explicitly asked.
+    certs_missing = not os.path.exists(cert_path) or not os.path.exists(key_path)
+    if args.fetch_certs or args.force_fetch or certs_missing:
+        if certs_missing and not args.fetch_certs and not args.force_fetch:
+            log.info("Certificates not found — fetching from API...")
+        try:
+            fetched = fetch_certs(certs_dir, force=args.force_fetch)
+            cert_path       = fetched["cert"]
+            key_path        = fetched["key"]
+            auth_crt_path   = fetched["auth_crt"]
+            int_path        = fetched["intermediate"]
+            signatures_path = fetched["sig_sha256"]
+        except Exception as exc:
+            log.error("Failed to fetch certificates: %s", exc)
+            if certs_missing:
+                sys.exit(1)
+            log.warning("Falling back to existing certificates")
+
+    # Verify key exists (cert is verified implicitly by TLS context creation)
     if not os.path.exists(key_path):
         log.error("TLS Private key not found: %s", key_path)
         sys.exit(1)
-
-    if args.generate_cert:
-        log.info("Generating new TLS certificate dynamically...")
-        cert_path = generate_tls_cert(key_path, cert_path)
-    elif not os.path.exists(cert_path):
+    if not os.path.exists(cert_path):
         log.error("TLS Certificate not found: %s", cert_path)
         sys.exit(1)
 

@@ -48,7 +48,7 @@ class _SetupHandler(BaseHTTPRequestHandler):
                 "<specVersion><major>1</major><minor>0</minor></specVersion>"
                 "<device>"
                 f"<deviceType>urn:dial-multiscreen-org:device:dial:1</deviceType>"
-                f"<friendlyName>{d.get('name','CastTest')}</friendlyName>"
+                f"<friendlyName>{d.get('name','Hiiragi Cast')}</friendlyName>"
                 f"<manufacturer>Google Inc.</manufacturer>"
                 f"<modelName>{d.get('model_name','Chromecast')}</modelName>"
                 f"<UDN>uuid:{d.get('uuid','')}</UDN>"

@@ -19,7 +19,7 @@ log = logging.getLogger("mDNS")
 class CastAdvertiser:
     """Advertise a Chromecast-compatible device via mDNS."""
 
-    def __init__(self, friendly_name="CastTest", port=8009, device_model="Eureka Dongle"):
+    def __init__(self, friendly_name="Hiiragi Cast", port=8009, device_model="Eureka Dongle"):
         self.friendly_name = friendly_name
         self.port = port
         self.device_model = device_model

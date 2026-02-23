@@ -52,7 +52,7 @@ class CastReceiver:
 
     def __init__(self, cert_file, key_file, peer_cert_file=None, port=8009,
                  auth_crt_file=None, signatures_file=None, media_bridge=None,
-                 friendly_name="CastTest", device_id=None):
+                 friendly_name="Hiiragi Cast", device_id=None):
         self.cert_file = cert_file
         self.key_file = key_file
         self.peer_cert_file = peer_cert_file
@@ -95,13 +95,16 @@ class CastReceiver:
         # Load Pre-computed Signatures
         self.precomputed_signature = None
         if signatures_file and os.path.exists(signatures_file):
-            with open(signatures_file, "r") as f:
-                data = f.read().strip()
-                # Parse hex string like "0x1c, 0xdc, ..."
-                hex_values = [x.strip() for x in data.split(",") if x.strip()]
-                # Just take the first 256 bytes (one signature)
+            with open(signatures_file, "rb") as f:
+                raw = f.read()
+            if signatures_file.endswith(".bin"):
+                # Raw binary signature (from cert_fetch)
+                self.precomputed_signature = raw
+            else:
+                # Legacy hex text format: "0x1c, 0xdc, ..."
+                hex_values = [x.strip() for x in raw.decode(errors="ignore").split(",") if x.strip()]
                 self.precomputed_signature = bytes([int(x, 16) for x in hex_values[:256]])
-            log.info("Loaded pre-computed signature for auth bypass")
+            log.info("Loaded pre-computed signature (%d bytes)", len(self.precomputed_signature))
 
         # Load intermediate/peer certs if available
         self.intermediate_certs_der = []
@@ -919,34 +922,3 @@ class CastReceiver:
                 },
             },
         }
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Cast V2 Receiver Test Server")
-    parser.add_argument("--cert", default="../AIRSCREEN.crt",
-                        help="Path to device certificate PEM file")
-    parser.add_argument("--key", default="../pk.pem",
-                        help="Path to private key PEM file")
-    parser.add_argument("--intermediate", default=None,
-                        help="Path to intermediate certificates PEM file (optional)")
-    parser.add_argument("--port", type=int, default=8009,
-                        help="Port to listen on (default: 8009)")
-
-    args = parser.parse_args()
-
-    # Resolve paths relative to script directory
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    cert_path = os.path.join(script_dir, args.cert) if not os.path.isabs(args.cert) else args.cert
-    key_path = os.path.join(script_dir, args.key) if not os.path.isabs(args.key) else args.key
-    int_path = None
-    if args.intermediate:
-        int_path = os.path.join(script_dir, args.intermediate) if not os.path.isabs(args.intermediate) else args.intermediate
-
-    receiver = CastReceiver(cert_path, key_path, int_path, args.port)
-    receiver.start()
-
-
-if __name__ == "__main__":
-    main()
