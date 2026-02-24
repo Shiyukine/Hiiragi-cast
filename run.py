@@ -54,8 +54,8 @@ Testing:
                         help="TLS certificate (default: ./certs/tls.pem)")
     parser.add_argument("--key", default="./certs/pk.pem",
                         help="TLS private key (default: ./certs/pk.pem)")
-    parser.add_argument("--fetch-certs", action="store_true",
-                        help="Fetch fresh certificates from the remotetogo API")
+    parser.add_argument("--no-fetch-certs", action="store_true",
+                        help="Don't fetch fresh certificates from the remotetogo API")
     parser.add_argument("--force-fetch", action="store_true",
                         help="Force re-fetch even if cached certs are still valid")
     parser.add_argument("--intermediate", default="./certs/intermediate.pem",
@@ -70,8 +70,8 @@ Testing:
                         help="Device friendly name (default: Hiiragi Cast)")
     parser.add_argument("--no-mdns", action="store_true",
                         help="Don't advertise via mDNS")
-    parser.add_argument("--electron", action="store_true",
-                        help="Start the Electron player and stream media events to it")
+    parser.add_argument("--no-electron", action="store_true",
+                        help="Don't start the Electron player and stream media events to it")
     parser.add_argument("--bridge-port", type=int, default=9000,
                         help="WebSocket port for Electron bridge (default: 9000)")
 
@@ -93,9 +93,7 @@ Testing:
     # ── Fetch / refresh certificates ──────────────────────────────────────────
     # Auto-fetch when any required cert file is missing, or when explicitly asked.
     certs_missing = not os.path.exists(cert_path) or not os.path.exists(key_path)
-    if args.fetch_certs or args.force_fetch or certs_missing:
-        if certs_missing and not args.fetch_certs and not args.force_fetch:
-            log.info("Certificates not found — fetching from API...")
+    if not args.no_fetch_certs:
         try:
             fetched = fetch_certs(certs_dir, force=args.force_fetch)
             cert_path       = fetched["cert"]
@@ -129,12 +127,12 @@ Testing:
     log.info("  Port            : %d", args.port)
     log.info("  Device Name     : %s", args.name)
     log.info("  mDNS            : %s", "disabled" if args.no_mdns else "enabled")
-    log.info("  Electron bridge : %s", f"ws://localhost:{args.bridge_port}" if args.electron else "disabled")
+    log.info("  Electron bridge : %s", f"ws://localhost:{args.bridge_port}" if not args.no_electron else "disabled")
     log.info("=" * 60)
 
     # Start media bridge (optional Electron player)
     bridge = None
-    if args.electron:
+    if not args.no_electron:
         bridge = MediaBridge(port=args.bridge_port)
         bridge.start()
         # Launch the Electron app

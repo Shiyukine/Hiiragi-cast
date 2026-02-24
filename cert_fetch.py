@@ -146,6 +146,44 @@ def fetch_certs(certs_dir: str, force: bool = False) -> dict:
             )
         return bytes(enc[i] ^ keystream[i % len(keystream)] for i in range(len(enc)))
 
+    def decrypt_pri(field: str) -> bytes:
+        """XOR-decrypt the private key field.
+
+        If the ciphertext is longer than the keystream, the missing keystream
+        bytes are recovered from the known PEM footer
+        (``-----END PRIVATE KEY-----\\n``) which is always at the very end of a
+        PKCS#8 PEM key.  The keystream is extended in memory **and** written back
+        to ``keystream.bin`` so subsequent runs are covered automatically.
+        """
+        nonlocal keystream
+        enc = b64(field)
+        extra = len(enc) - len(keystream)
+
+        if extra > 0:
+            # The last 26 bytes of any PKCS#8 PEM key are the fixed footer.
+            pem_footer = b"-----END PRIVATE KEY-----\n"
+            if extra > len(pem_footer):
+                raise RuntimeError(
+                    f"Field '{field}' ({len(enc)}B) exceeds keystream by {extra}B, "
+                    f"which is more than the known PEM footer ({len(pem_footer)}B). "
+                    "Cannot auto-extend keystream; please capture a fresh pk.pem."
+                )
+            # The trailing `extra` bytes of the plaintext are the last `extra`
+            # bytes of the PEM footer.
+            known_tail = pem_footer[-extra:]
+            tail_enc   = enc[len(keystream):]
+            new_ks     = bytes(e ^ p for e, p in zip(tail_enc, known_tail))
+
+            log.info(
+                "Auto-extending keystream by %dB using known PEM footer "
+                "and saving updated keystream.bin.", extra
+            )
+            keystream = keystream + new_ks
+            with open(ks_path, "wb") as _f:
+                _f.write(keystream)
+
+        return bytes(enc[i] ^ keystream[i] for i in range(len(enc)))
+
     # ── Parse decrypted fields ────────────────────────────────────────────────
     ica_der  = decrypt("ica")          # Eureka Gen1 ICA cert (DER)
 
@@ -167,7 +205,7 @@ def fetch_certs(certs_dir: str, force: bool = False) -> dict:
 
     cpu_der  = decrypt("cpu")          # Google-signed device cert (DER)
     pub_der  = decrypt("pub")          # TLS cert (DER)
-    pri_pem  = decrypt("pri")          # TLS private key (PEM text, decrypted)
+    pri_pem  = decrypt_pri("pri")       # TLS private key (PEM text, decrypted)
     sig256   = decrypt("sha256")       # pre-computed SHA-256 signature (raw bytes)
     sig1     = decrypt("sha1")         # pre-computed SHA-1   signature (raw bytes)
 
@@ -241,12 +279,90 @@ def fetch_certs(certs_dir: str, force: bool = False) -> dict:
     return paths
 
 
+def generate_keystream(pk_pem_path: str, ks_out_path: str | None = None) -> bytes:
+    """Regenerate ``keystream.bin`` from a known-plaintext private key PEM.
+
+    This performs a single fresh API call, XORs the encrypted ``pri`` field
+    with the provided plaintext PEM, and writes the result to *ks_out_path*
+    (defaults to ``keystream.bin`` next to this script).
+
+    Use this when:
+      - ``keystream.bin`` does not exist yet
+      - The API has rotated its encryption key (ICA sanity check fails)
+      - The key overshoot exceeds the 26-byte PEM footer guard
+
+    Steps to obtain the plaintext ``pk.pem``:
+      1. Run the Frida TLS hook (``utils/hook_cert_dump.js``) against the
+         remotetogo app while it fetches certificates.
+      2. Save the captured private key as ``pk.pem`` (PKCS#8 PEM format).
+      3. Run:  ``python cert_fetch.py --gen-keystream pk.pem``
+    """
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if ks_out_path is None:
+        ks_out_path = os.path.join(_here, "keystream.bin")
+
+    # Load known-plaintext PEM (strip trailing garbage / binary junk after the
+    # end marker, as seen in certs/pk.pem captured via Frida).
+    with open(pk_pem_path, "rb") as f:
+        raw = f.read()
+    end_marker = b"-----END PRIVATE KEY-----"
+    idx = raw.find(end_marker)
+    if idx == -1:
+        raise ValueError(f"{pk_pem_path} does not contain a PKCS#8 PEM end marker.")
+    plaintext = raw[: idx + len(end_marker)] + b"\n"
+
+    # Fetch a fresh encrypted pri from the API.
+    url = _api_url()
+    log.info("Fetching API for keystream generation...")
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as exc:
+        raise RuntimeError(f"API request failed: {exc}") from exc
+
+    def b64(field: str) -> bytes:
+        raw_b64 = data[field]
+        padding = (4 - len(raw_b64) % 4) % 4
+        return base64.b64decode(raw_b64 + "=" * padding)
+
+    enc_pri = b64("pri")
+
+    if len(enc_pri) != len(plaintext):
+        raise RuntimeError(
+            f"Length mismatch: API encrypted pri is {len(enc_pri)}B but "
+            f"'{pk_pem_path}' is {len(plaintext)}B. "
+            "Make sure pk.pem was captured during the same key window as this API call."
+        )
+
+    keystream = bytes(e ^ p for e, p in zip(enc_pri, plaintext))
+
+    with open(ks_out_path, "wb") as f:
+        f.write(keystream)
+
+    log.info("keystream.bin written (%dB) → %s", len(keystream), ks_out_path)
+    return keystream
+
+
 if __name__ == "__main__":
+    import argparse
+
     logging.basicConfig(level=logging.DEBUG,
                         format="%(asctime)s [%(levelname)s] %(message)s",
                         datefmt="%H:%M:%S")
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    result = fetch_certs(os.path.join(script_dir, "certs"), force=True)
-    print("\nFetched:")
-    for k, v in result.items():
-        print(f"  {k}: {v}")
+
+    parser = argparse.ArgumentParser(description="Certificate fetcher / keystream tool")
+    parser.add_argument("--gen-keystream", metavar="PK_PEM",
+                        help="Regenerate keystream.bin from a known-plaintext pk.pem")
+    parser.add_argument("--ks-out", metavar="PATH",
+                        help="Output path for keystream.bin (default: <script dir>/keystream.bin)")
+    args = parser.parse_args()
+
+    if args.gen_keystream:
+        ks = generate_keystream(args.gen_keystream, args.ks_out)
+        print(f"keystream.bin regenerated ({len(ks)}B)")
+    else:
+        result = fetch_certs(os.path.join(script_dir, "certs"), force=True)
+        print("\nFetched:")
+        for k, v in result.items():
+            print(f"  {k}: {v}")

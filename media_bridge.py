@@ -22,54 +22,6 @@ import threading
 
 log = logging.getLogger("MediaBridge")
 
-# ── YouTube URL resolution (requires yt-dlp: pip install yt-dlp) ──────────────
-_YT_RE = re.compile(
-    r'(?:youtube\.com/(?:watch\?.*?v=|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})'
-)
-
-
-def _is_youtube(url: str) -> bool:
-    """True for youtube.com/youtu.be URLs or bare 11-char video IDs."""
-    if _YT_RE.search(url):
-        return True
-    # bare 11-char video ID (alphanumeric + - _)
-    return bool(re.fullmatch(r'[A-Za-z0-9_-]{11}', url))
-
-
-def _to_youtube_url(raw: str) -> str:
-    """Normalise any YouTube URL or bare video ID to a canonical watch URL."""
-    m = _YT_RE.search(raw)
-    if m:
-        return f'https://www.youtube.com/watch?v={m.group(1)}'
-    return f'https://www.youtube.com/watch?v={raw}'  # assume bare ID
-
-
-def _resolve_youtube(url: str) -> tuple:
-    """Use yt-dlp to extract a direct stream URL from a YouTube URL.
-    Returns (stream_url, title).  Falls back to (url, '') on failure.
-    """
-    try:
-        import yt_dlp  # soft dependency
-        ydl_opts = {
-            'format': 'b[ext=mp4]/b/best',  # single-file stream, no merge needed
-            'quiet': True,
-            'no_warnings': True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            direct = info.get('url', '')
-            if not direct and 'requested_formats' in info:
-                direct = info['requested_formats'][0].get('url', '')
-            title = info.get('title', '')
-            return (direct or url, title)
-    except ImportError:
-        log.warning('[Bridge] yt-dlp not installed — YouTube playback unavailable. '
-                    'Run: pip install yt-dlp')
-    except Exception as exc:
-        log.warning('[Bridge] yt-dlp resolution failed: %s', exc)
-    return (url, '')
-
-
 try:
     import websockets
     _HAS_WEBSOCKETS = True
@@ -122,16 +74,6 @@ class MediaBridge:
         duration     = media.get("duration")
         images       = metadata.get("images", [])
         poster       = images[0].get("url", "") if images else ""
-
-        # Resolve YouTube URLs to direct streams via yt-dlp
-        if _is_youtube(content_id):
-            yt_url = _to_youtube_url(content_id)
-            log.info('[Bridge] Resolving YouTube URL: %s', yt_url)
-            resolved, yt_title = _resolve_youtube(yt_url)
-            content_id = resolved
-            content_type = content_type or 'video/mp4'
-            if not title and yt_title:
-                title = yt_title
 
         self.send({
             "event": "load",

@@ -146,9 +146,6 @@ class CastReceiver:
                           _hl.md5((friendly_name + str(_uuid.getnode())).encode())
                           .hexdigest().upper())
 
-        # YouTube MDX state
-        self.yt_video_id = None  # currently loaded YouTube video ID
-
         log.info("Loaded certificate: %s", self.cert.subject)
         log.info("Certificate fingerprint (SHA256): %s",
                  self.cert.fingerprint(hashes.SHA256()).hex())
@@ -485,7 +482,6 @@ class CastReceiver:
             transport_id = "web-" + hashlib.md5(os.urandom(8)).hexdigest()[:6]
             self.media_transport_id = transport_id
             self.media_status = None  # reset media on new launch
-            self.yt_video_id = None   # reset YouTube state on new launch
             self.applications = [{
                 "appId": app_id,
                 "displayName": self._app_display_name(app_id),
@@ -827,84 +823,6 @@ class CastReceiver:
                 msg.destination_id, msg.source_id, NS_SETUP,
                 payload_utf8=json.dumps(response)))
             log.info("  >> eureka_info response sent")
-
-    def _handle_youtube(self, sock, msg, payload):
-        """Handle YouTube MDX namespace messages (app 233637DE).
-
-        The YouTube sender never uses the standard MEDIA namespace — it sends
-        setState commands on urn:x-cast:com.google.youtube.mdx.  We translate
-        those into bridge calls (which will resolve via yt-dlp in on_load).
-
-        YouTube state values: 1 = playing, 2 = paused, -1 = stopped/unstarted.
-        """
-        msg_type = payload.get("type", "")
-
-        def send_mdx_status(state="idle", video_id="", current_time=0):
-            status = {
-                "type": "mdxSessionStatus",
-                "data": {
-                    "screenId": "hiiragi-cast",
-                    "status": {
-                        "state": state,
-                        "loadedVideoId": video_id or "",
-                        "currentTime": current_time,
-                        "duration": 0,
-                        "muted": False,
-                        "volume": 100,
-                    },
-                },
-            }
-            self._send_message(sock, self._build_message(
-                msg.destination_id, msg.source_id, NS_YOUTUBE,
-                payload_utf8=json.dumps(status)))
-
-        if msg_type in ("getMdxSessionStatus", "register", "nonce"):
-            send_mdx_status()
-
-        elif msg_type == "setState":
-            video_id = payload.get("videoId") or payload.get("videoID", "")
-            state = payload.get("state", -1)        # 1=playing, 2=paused, -1=stopped
-            current_time = float(payload.get("currentTime", 0) or 0)
-
-            if video_id and video_id != self.yt_video_id:
-                # New (or first) video — resolve via yt-dlp in on_load
-                log.info("  YOUTUBE LOAD: videoId=%s", video_id)
-                self.yt_video_id = video_id
-                media = {
-                    "contentId": f"https://www.youtube.com/watch?v={video_id}",
-                    "contentType": "video/mp4",
-                    "metadata": {"title": ""},
-                }
-                if self.bridge:
-                    self.bridge.on_load(media, current_time)
-                send_mdx_status("playing" if state == 1 else "paused",
-                                video_id, current_time)
-
-            elif state == 1:
-                log.info("  YOUTUBE PLAY")
-                if self.bridge:
-                    self.bridge.on_play()
-                send_mdx_status("playing", self.yt_video_id or "", current_time)
-
-            elif state == 2:
-                log.info("  YOUTUBE PAUSE")
-                if self.bridge:
-                    self.bridge.on_pause()
-                send_mdx_status("paused", self.yt_video_id or "", current_time)
-
-            elif state == -1:
-                log.info("  YOUTUBE STOP")
-                self.yt_video_id = None
-                if self.bridge:
-                    self.bridge.on_stop()
-                send_mdx_status("idle")
-
-            elif current_time and not video_id:
-                # Seek-only setState
-                log.info("  YOUTUBE SEEK: %.1f", current_time)
-                if self.bridge:
-                    self.bridge.on_seek(current_time)
-                send_mdx_status("playing", self.yt_video_id or "", current_time)
 
     def _get_receiver_status(self):
         """Build receiver status response."""
