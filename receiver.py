@@ -20,6 +20,7 @@ import hashlib
 import os
 import sys
 import time
+import urllib.request
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -28,6 +29,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 # Add parent path for protobuf import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cast_channel_pb2
+from setup_server import cast_ipc
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +47,69 @@ NS_MEDIA = "urn:x-cast:com.google.cast.media"
 NS_YOUTUBE = "urn:x-cast:com.google.youtube.mdx"
 NS_SETUP = "urn:x-cast:com.google.cast.setup"
 NS_DISCOVERY = "urn:x-cast:com.google.cast.receiver.discovery"
+
+# ---------------------------------------------------------------------------
+# App Configs — loaded from the Chromecast baseconfig API
+# APP_CONFIGS maps  app_id (str) -> receiver URL (str)
+# Any app that has a URL in this dict is treated as an IPC app (loaded in
+# the Electron webview which then connects to ws://localhost:8008/v2/ipc).
+# ---------------------------------------------------------------------------
+
+_BASECONFIG_URL   = "https://clients3.google.com/cast/chromecast/device/baseconfig"
+_BASECONFIG_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "json.txt")
+
+
+def _load_app_configs() -> dict:
+    """Return a dict mapping app_id -> receiver URL.
+
+    Fetches the Chromecast baseconfig from Google and caches the raw response
+    to *json.txt* (next to this file).  Subsequent runs read from cache.
+    The first line of the response is a XSSI protection prefix (')]}'\n') and
+    is skipped before JSON parsing.
+    """
+    # --- fetch if cache is missing ---
+    if not os.path.exists(_BASECONFIG_CACHE):
+        log.info("APP_CONFIGS: Fetching baseconfig from %s", _BASECONFIG_URL)
+        try:
+            req = urllib.request.Request(
+                _BASECONFIG_URL,
+                headers={"User-Agent": "Mozilla/5.0 (CrKey armv7l 1.56.500000) "
+                                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                       "Chrome/56.0.2924.41 Safari/537.36 CrKey/1.56.500000"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read()
+            with open(_BASECONFIG_CACHE, "wb") as fh:
+                fh.write(raw)
+            log.info("APP_CONFIGS: Cached baseconfig to %s", _BASECONFIG_CACHE)
+        except Exception as exc:
+            log.warning("APP_CONFIGS: Could not fetch baseconfig (%s) — using empty config", exc)
+            return {}
+
+    # --- read cache, skip first line (XSSI prefix) ---
+    try:
+        with open(_BASECONFIG_CACHE, "r", encoding="utf-8") as fh:
+            fh.readline()          # skip  )]}'
+            rest = fh.read()
+        data = json.loads(rest)
+    except Exception as exc:
+        log.warning("APP_CONFIGS: Failed to parse baseconfig (%s) — using empty config", exc)
+        return {}
+
+    # --- walk the app list ---
+    # Root may be a list directly or a dict with an 'applications' key.
+    apps = data if isinstance(data, list) else data.get("applications", [])
+    configs: dict = {}
+    for app in apps:
+        app_id = app.get("app_id", "")
+        url    = app.get("url", "")
+        if app_id and url:
+            configs[app_id] = url
+    log.info("APP_CONFIGS: Loaded %d app URL(s) from baseconfig", len(configs))
+    return configs
+
+
+APP_CONFIGS: dict = _load_app_configs()
 
 
 class CastReceiver:
@@ -135,6 +200,12 @@ class CastReceiver:
         self.media_session_id = 0
         self.media_status = None   # dict or None when idle
         self.media_transport_id = None  # transportId of the active app session
+
+        # IPC app: track senders connected to the active transport
+        self._ipc_sender_sockets: dict = {}  # sender_id -> (sock, transport_id)
+        self._ipc_lock = threading.Lock()
+        # Messages that arrived before the SDK connected — flushed on_sdk_ready
+        self._ipc_pending: list = []  # list of (namespace, source_id, payload_utf8)
 
         # Optional Electron media bridge
         self.bridge = media_bridge
@@ -278,7 +349,7 @@ class CastReceiver:
         header = struct.pack(">I", len(data))
         try:
             sock.sendall(header + data)
-        except (BrokenPipeError, OSError) as e:
+        except (BrokenPipeError, OSError, ssl.SSLError) as e:
             log.error("Failed to send message: %s", e)
 
     def _build_message(self, source_id, dest_id, namespace, payload_utf8=None, payload_binary=None):
@@ -311,7 +382,7 @@ class CastReceiver:
             self._handle_connection(sock, msg, payload)
         elif ns == NS_HEARTBEAT:
             payload = json.loads(msg.payload_utf8)
-            log.info("[%s] << HEARTBEAT: %s", client_id, payload.get("type"))
+            log.debug("[%s] << HEARTBEAT: %s", client_id, payload.get("type"))
             self._handle_heartbeat(sock, msg, payload)
         elif ns == NS_RECEIVER:
             payload = json.loads(msg.payload_utf8)
@@ -320,11 +391,19 @@ class CastReceiver:
         elif ns == NS_MEDIA:
             payload = json.loads(msg.payload_utf8)
             log.info("[%s] << MEDIA: %s", client_id, payload.get("type"))
-            self._handle_media(sock, msg, payload)
+            if self.applications and self._is_ipc_app(self.applications[0].get("appId", "")):
+                if cast_ipc.is_connected:
+                    log.info("[%s]  -> forwarding MEDIA to Cast SDK via IPC", client_id)
+                    cast_ipc.send_message(ns, msg.source_id, msg.payload_utf8)
+                else:
+                    log.info("[%s]  -> buffering MEDIA (SDK not yet connected)", client_id)
+                    self._ipc_pending.append((ns, msg.source_id, msg.payload_utf8))
+            else:
+                self._handle_media(sock, msg, payload)
         elif ns == NS_YOUTUBE:
             payload = json.loads(msg.payload_utf8)
             log.info("[%s] << YOUTUBE: %s", client_id, payload.get("type"))
-            self._handle_youtube(sock, msg, payload)
+            # self._handle_youtube(sock, msg, payload)
         elif ns == NS_SETUP:
             payload = json.loads(msg.payload_utf8)
             log.info("[%s] << SETUP: %s", client_id, payload.get("type"))
@@ -442,9 +521,29 @@ class CastReceiver:
         if msg_type == "CONNECT":
             log.info("  Client connected: dest=%s origin=%s",
                      msg.destination_id, payload.get("origin", ""))
-            # No response needed for CONNECT
+            # If connecting to an IPC app transport, track the sender
+            if (msg.destination_id == self.media_transport_id and
+                    self.applications and
+                    self._is_ipc_app(self.applications[0].get("appId", ""))):
+                with self._ipc_lock:
+                    self._ipc_sender_sockets[msg.source_id] = (sock, msg.destination_id)
+                log.info("  Tracking IPC sender: src=%s dest=%s", msg.source_id, msg.destination_id)
+                if cast_ipc.is_connected:
+                    cast_ipc.send_sender_connected(msg.source_id)
+            else:
+                log.debug("  Not tracking CONNECT: dest=%s transport=%s ipc=%s",
+                          msg.destination_id, self.media_transport_id,
+                          self._is_ipc_app(self.applications[0].get("appId", ""))
+                          if self.applications else False)
         elif msg_type == "CLOSE":
             log.info("  Client requested close: dest=%s", msg.destination_id)
+            # If this sender was tracked, untrack and notify the SDK
+            with self._ipc_lock:
+                if msg.source_id in self._ipc_sender_sockets:
+                    del self._ipc_sender_sockets[msg.source_id]
+                    log.info("  IPC sender disconnected: %s", msg.source_id)
+                    if cast_ipc.is_connected:
+                        cast_ipc.send_sender_disconnected(msg.source_id)
             # If they closed the transport session, clear media state
             if msg.destination_id == self.media_transport_id:
                 self.media_status = None
@@ -459,7 +558,7 @@ class CastReceiver:
                 payload_utf8=json.dumps({"type": "PONG"})
             )
             self._send_message(sock, pong)
-            log.info("  >> PONG")
+            log.debug("  >> PONG")
 
     def _handle_receiver(self, sock, msg, payload):
         """Handle receiver namespace messages."""
@@ -479,7 +578,10 @@ class CastReceiver:
         elif msg_type == "LAUNCH":
             app_id = payload.get("appId", "CC1AD845")
             log.info("  Launch request for app: %s", app_id)
-            transport_id = "web-" + hashlib.md5(os.urandom(8)).hexdigest()[:6]
+            # Use the same value for sessionId and transportId — real Chromecasts do
+            # this, and it ensures that sender CONNECT messages (which use the
+            # transportId from RECEIVER_STATUS) match self.media_transport_id.
+            transport_id = hashlib.md5(os.urandom(16)).hexdigest()
             self.media_transport_id = transport_id
             self.media_status = None  # reset media on new launch
             self.applications = [{
@@ -495,7 +597,7 @@ class CastReceiver:
                     {"name": NS_MEDIA},
                     {"name": "urn:x-cast:com.google.cast.cac"},
                 ],
-                "sessionId": hashlib.md5(os.urandom(16)).hexdigest(),
+                "sessionId": transport_id,   # same as transportId
                 "statusText": "Ready To Cast",
                 "transportId": transport_id,
                 "universalAppId": app_id,
@@ -508,12 +610,18 @@ class CastReceiver:
             )
             self._send_message(sock, response)
             log.info("  >> RECEIVER_STATUS with launched app (transport=%s)", transport_id)
+            # For IPC apps (apps with a known receiver URL), load the page in
+            # Electron and wire the IPC bridge.
+            if app_id in APP_CONFIGS:
+                self._launch_ipc_app(app_id, launching_sender_id=msg.source_id)
 
         elif msg_type == "STOP":
             app_session_id = payload.get("sessionId")
             # Only stop if it matches the active session
             if app_session_id and self.applications and \
                self.applications[0].get("sessionId") == app_session_id:
+                if self.applications[0].get("appId", "") in APP_CONFIGS:
+                    self._stop_ipc_app()
                 self.applications = []
                 self.media_status = None
                 self.media_transport_id = None
@@ -559,6 +667,109 @@ class CastReceiver:
 
         else:
             log.info("  Unhandled receiver message type: %s", msg_type)
+
+    # ------------------------------------------------------------------ #
+    #  IPC App helpers                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _is_ipc_app(self, app_id: str) -> bool:
+        """Return True if this app uses the /v2/ipc WebSocket channel."""
+        return app_id in APP_CONFIGS
+
+    def _launch_ipc_app(self, app_id: str, launching_sender_id: str = ""):
+        """Load the receiver URL in Electron and wire the IPC bridge callbacks."""
+        url = APP_CONFIGS.get(app_id, "")
+        if url and self.bridge:
+            log.info("[IPC] Loading receiver URL in Electron: %s", url[:80])
+            self.bridge.load_url(url)
+
+        # Reset the pending buffer for this new app session
+        self._ipc_pending.clear()
+
+        # Provide the app launch info so the IPC bridge can respond to the SDK's
+        # "ready" handshake with the correct application context.
+        app = self.applications[0] if self.applications else {}
+        cast_ipc.launch_info = {
+            "applicationId": app.get("appId", app_id),
+            "applicationName": app.get("displayName", ""),
+            "sessionId": app.get("sessionId", ""),
+            "iconUrl": app.get("iconUrl", ""),
+            "deviceCapabilities": {},
+            "launchedFrom": "CAST",
+            "launchingSenderId": launching_sender_id,
+        }
+        log.info("[IPC] launch_info set: appId=%s session=%s launchingSender=%s",
+                 cast_ipc.launch_info["applicationId"],
+                 cast_ipc.launch_info["sessionId"],
+                 launching_sender_id)
+
+        # Wire callbacks on the global IPC bridge singleton
+        def on_sdk_ready():
+            log.info("[IPC] SDK ready \u2014 sending senderConnected for tracked senders")
+            with self._ipc_lock:
+                senders = list(self._ipc_sender_sockets.keys())
+            for sender_id in senders:
+                cast_ipc.send_sender_connected(sender_id)
+            # Flush messages that arrived before the SDK connected
+            pending = self._ipc_pending[:]
+            self._ipc_pending.clear()
+            if pending:
+                log.info("[IPC] Flushing %d buffered message(s) to SDK", len(pending))
+            for (pns, psrc, ppayload) in pending:
+                cast_ipc.send_message(pns, psrc, ppayload)
+
+        def on_ipc_message(namespace, client_id, data):
+            self._ipc_to_cast_v2(namespace, client_id, data)
+
+        cast_ipc.on_sdk_ready = on_sdk_ready
+        cast_ipc.on_message = on_ipc_message
+        log.info("[IPC] IPC bridge configured for app %s", app_id)
+
+    def _stop_ipc_app(self):
+        """Tear down the IPC app: close the Electron window and clear callbacks."""
+        cast_ipc.on_sdk_ready = None
+        cast_ipc.on_message = None
+        cast_ipc.launch_info = {}
+        cast_ipc.disconnect()
+        with self._ipc_lock:
+            self._ipc_sender_sockets.clear()
+        if self.bridge:
+            self.bridge.stop_webview()
+        log.info("[IPC] IPC app stopped")
+
+    def _ipc_to_cast_v2(self, namespace: str, client_id: str, data: str):
+        """Forward a message from the Cast SDK back to a Cast V2 sender."""
+        transport_id = self.media_transport_id
+        if not transport_id:
+            log.debug("[IPC\u2192Cast] Dropping %s — no active transport", namespace)
+            return
+
+        with self._ipc_lock:
+            # "*:*" means broadcast to all connected senders; empty also broadcasts
+            if client_id and client_id != "*:*":
+                targets = [(client_id, self._ipc_sender_sockets.get(client_id))]
+            else:
+                targets = list(self._ipc_sender_sockets.items())
+
+        if not targets:
+            log.warning("[IPC\u2192Cast] No tracked senders for %s (client_id=%r)",
+                        namespace, client_id)
+            return
+
+        for sender_id, info in targets:
+            if info is None:
+                log.warning("[IPC\u2192Cast] No socket for sender %s — not connected via Cast V2",
+                            sender_id)
+                continue
+            sock, _ = info
+            try:
+                msg = self._build_message(
+                    transport_id, sender_id, namespace, payload_utf8=data
+                )
+                self._send_message(sock, msg)
+                log.info("[IPC\u2192Cast] %s \u2192 %s", namespace.split(":")[-1], sender_id)
+            except Exception as exc:
+                log.warning("[IPC\u2192Cast] Failed to send to %s: %s", sender_id, exc)
 
     def _handle_media(self, sock, msg, payload):
         """Handle media namespace messages."""

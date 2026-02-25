@@ -1,5 +1,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
+app.commandLine.appendSwitch('disable-site-isolation-trials')
 const path = require('path');
+app.userAgentFallback = "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 CrKey/1.56.467165";
 
 // Default bridge WebSocket port (must match --bridge-port in run.py)
 const BRIDGE_PORT = process.env.BRIDGE_PORT || 9000;
@@ -19,7 +21,19 @@ function createWindow() {
             nodeIntegration: false,
             // Allow playback of any content URL (CORS bypass for cast streams)
             webSecurity: false,
+            // Required for <webview> tag to work in the renderer
+            webviewTag: true,
         },
+    });
+
+    // remove X-Frame-Options to allow embedding the player in an iframe (for the web-based UI)
+    mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+        const responseHeaders = details.responseHeaders;
+        delete responseHeaders['x-frame-options'];
+        delete responseHeaders['content-security-policy-report-only'];
+        delete responseHeaders['content-security-policy'];
+        delete responseHeaders[''];
+        callback({ cancel: false, responseHeaders });
     });
 
     mainWindow.loadFile('index.html');
@@ -48,5 +62,6 @@ ipcMain.on('set-fullscreen', (_, flag) => {
 });
 
 ipcMain.on('set-title', (_, title) => {
-    mainWindow?.setTitle(title ? `${title} — Hiiragi Cast` : 'Hiiragi Cast Player');
+    mainWindow?.setTitle(title ? `${title} – Hiiragi Cast` : 'Hiiragi Cast Player');
 });
+

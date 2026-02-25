@@ -101,6 +101,14 @@ class MediaBridge:
     def on_volume(self, level: float, muted: bool):
         self.send({"event": "volume", "level": level, "muted": muted})
 
+    def load_url(self, url: str):
+        """Tell Electron to open the Cast receiver app in a new window."""
+        self.send({"event": "load-url", "url": url})
+
+    def stop_webview(self):
+        """Tell Electron to close the Cast receiver window."""
+        self.send({"event": "stop-url"})
+
     # ------------------------------------------------------------------ #
     #  Internal asyncio loop (runs in background thread)                  #
     # ------------------------------------------------------------------ #

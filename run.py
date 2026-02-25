@@ -23,6 +23,7 @@ from mdns_advertiser import CastAdvertiser
 from cert_fetch import fetch_certs
 from media_bridge import MediaBridge
 from setup_server import CastSetupServer
+from ssdp_server import SSDPServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -159,6 +160,7 @@ Testing:
         any_failed = False
         for _rule, _proto, _port in [
             ("HiiragiCast-mDNS",   "UDP", "5353"),
+            ("HiiragiCast-SSDP",   "UDP", "1900"),
             ("HiiragiCast-Setup",  "TCP", "8008"),
             ("HiiragiCast-Cast",   "TCP", str(args.port)),
         ]:
@@ -176,6 +178,7 @@ Testing:
 
     # Start mDNS advertiser
     advertiser = None
+    ssdp_srv = None
     if not args.no_mdns:
         advertiser = CastAdvertiser(args.name, args.port)
 
@@ -198,6 +201,25 @@ Testing:
             log.warning("You can still test by connecting directly to this IP:port")
             advertiser = None
 
+        # Start SSDP (UPnP discovery — lets phones find the device on some networks)
+        try:
+            import socket as _sock
+            _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+            _s.connect(("8.8.8.8", 80))
+            _local_ip = _s.getsockname()[0]
+            _s.close()
+            _uuid = advertiser.device_id.lower() if advertiser else "00000000000000000000000000000000"
+            ssdp_srv = SSDPServer(
+                friendly_name=args.name,
+                local_ip=_local_ip,
+                http_port=8008,
+                device_uuid=_uuid,
+            )
+            ssdp_srv.start()
+        except Exception as e:
+            log.warning("SSDP server failed (non-fatal): %s", e)
+            ssdp_srv = None
+
     # Start receiver
     receiver = CastReceiver(
         cert_file=cert_path,
@@ -219,6 +241,8 @@ Testing:
     finally:
         if advertiser:
             advertiser.stop()
+        if ssdp_srv:
+            ssdp_srv.stop()
         log.info("Shutdown complete.")
 
 
