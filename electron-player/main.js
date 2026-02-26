@@ -36,7 +36,6 @@ function createWindow() {
         callback({ cancel: false, responseHeaders });
     });
 
-    mainWindow.loadFile('index.html');
     mainWindow.setMenuBarVisibility(false);
 
     // Pass the bridge port to the renderer via query param

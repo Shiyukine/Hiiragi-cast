@@ -44,7 +44,6 @@ NS_HEARTBEAT = "urn:x-cast:com.google.cast.tp.heartbeat"
 NS_RECEIVER = "urn:x-cast:com.google.cast.receiver"
 NS_AUTH = "urn:x-cast:com.google.cast.tp.deviceauth"
 NS_MEDIA = "urn:x-cast:com.google.cast.media"
-NS_YOUTUBE = "urn:x-cast:com.google.youtube.mdx"
 NS_SETUP = "urn:x-cast:com.google.cast.setup"
 NS_DISCOVERY = "urn:x-cast:com.google.cast.receiver.discovery"
 
@@ -98,19 +97,46 @@ def _load_app_configs() -> dict:
 
     # --- walk the app list ---
     # Root may be a list directly or a dict with an 'applications' key.
-    apps = data if isinstance(data, list) else data.get("applications", [])
+    apps = data.get("applications", [])
     configs: dict = {}
     for app in apps:
         app_id = app.get("app_id", "")
-        url    = app.get("url", "")
-        if app_id and url:
-            configs[app_id] = url
+        if app_id:
+            configs[app_id] = app
     log.info("APP_CONFIGS: Loaded %d app URL(s) from baseconfig", len(configs))
     return configs
 
 
 APP_CONFIGS: dict = _load_app_configs()
 
+def _fetch_app_metadata(app_id: str) -> dict:
+    """Fetch metadata for a given app ID from the baseconfig API."""
+    url = "https://clients3.google.com/cast/chromecast/device/app?a=" + app_id
+    if not app_id:
+        log.error("Cannot fetch metadata for empty app_id")
+        return {}
+    try:
+        log.info("Getting metadata in APP_CONFIGS for app_id=%s", app_id)
+        return APP_CONFIGS[app_id]
+    except Exception:
+        pass
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (CrKey armv7l 1.56.500000) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                   "Chrome/56.0.2924.41 Safari/537.36 CrKey/1.56.500000"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.readline()  # skip XSSI prefix
+            raw = resp.read()
+        data = json.loads(raw.decode("utf-8", errors="ignore"))
+        log.info("Fetched metadata for app_id=%s: %s", app_id, data.get("display_name", ""))
+        APP_CONFIGS[app_id] = data  # cache it for future use
+        return data
+    except Exception as exc:
+        log.warning("Failed to fetch metadata for app_id=%s: %s", app_id, exc)
+        return {"url": "", "display_name": "Unknown App"}
 
 class CastReceiver:
     """Minimal Cast V2 receiver with TLS authentication."""
@@ -400,10 +426,6 @@ class CastReceiver:
                     self._ipc_pending.append((ns, msg.source_id, msg.payload_utf8))
             else:
                 self._handle_media(sock, msg, payload)
-        elif ns == NS_YOUTUBE:
-            payload = json.loads(msg.payload_utf8)
-            log.info("[%s] << YOUTUBE: %s", client_id, payload.get("type"))
-            # self._handle_youtube(sock, msg, payload)
         elif ns == NS_SETUP:
             payload = json.loads(msg.payload_utf8)
             log.info("[%s] << SETUP: %s", client_id, payload.get("type"))
@@ -584,21 +606,18 @@ class CastReceiver:
             transport_id = hashlib.md5(os.urandom(16)).hexdigest()
             self.media_transport_id = transport_id
             self.media_status = None  # reset media on new launch
+            app_name = _fetch_app_metadata(app_id).get("display_name", app_id)
             self.applications = [{
                 "appId": app_id,
-                "displayName": self._app_display_name(app_id),
+                "displayName": app_name,
                 "isIdleScreen": False,
                 "launchedFromCloud": False,
                 "namespaces": [
                     {"name": NS_MEDIA},
-                    {"name": NS_YOUTUBE},
-                    {"name": "urn:x-cast:com.google.cast.cac"},
-                ] if app_id == "233637DE" else [
-                    {"name": NS_MEDIA},
                     {"name": "urn:x-cast:com.google.cast.cac"},
                 ],
                 "sessionId": transport_id,   # same as transportId
-                "statusText": "Ready To Cast",
+                "statusText": "Hiiragi Cast - " + app_name,
                 "transportId": transport_id,
                 "universalAppId": app_id,
             }]
@@ -610,10 +629,9 @@ class CastReceiver:
             )
             self._send_message(sock, response)
             log.info("  >> RECEIVER_STATUS with launched app (transport=%s)", transport_id)
-            # For IPC apps (apps with a known receiver URL), load the page in
+            # For IPC apps, load the page in
             # Electron and wire the IPC bridge.
-            if app_id in APP_CONFIGS:
-                self._launch_ipc_app(app_id, launching_sender_id=msg.source_id)
+            self._launch_ipc_app(app_id, launching_sender_id=msg.source_id)
 
         elif msg_type == "STOP":
             app_session_id = payload.get("sessionId")
@@ -664,6 +682,7 @@ class CastReceiver:
             )
             self._send_message(sock, response)
             log.info("  >> GET_APP_AVAILABILITY: %s", list(availability.keys()))
+            log.info("Prefetched metadata for available apps: %s", ", ".join(_fetch_app_metadata(aid).get("display_name", aid) for aid in availability.keys()))
 
         else:
             log.info("  Unhandled receiver message type: %s", msg_type)
@@ -678,8 +697,14 @@ class CastReceiver:
 
     def _launch_ipc_app(self, app_id: str, launching_sender_id: str = ""):
         """Load the receiver URL in Electron and wire the IPC bridge callbacks."""
-        url = APP_CONFIGS.get(app_id, "")
-        if url and self.bridge:
+        url = _fetch_app_metadata(app_id).get("url", "")
+        if self.bridge:
+            if url:
+                device_name = self.friendly_name or "Cast Receiver"
+                url = url.format(URL_ENCODED_FRIENDLY_NAME=device_name.replace(" ", "%20"))
+            else:
+                log.warning("[IPC] No URL found for app_id=%s — cannot launch IPC app", app_id)
+                return
             log.info("[IPC] Loading receiver URL in Electron: %s", url[:80])
             self.bridge.load_url(url)
 
@@ -929,20 +954,6 @@ class CastReceiver:
             payload_utf8=json.dumps(media_status)
         )
         self._send_message(sock, response)
-
-    def _app_display_name(self, app_id):
-        """Return a friendly display name for known app IDs."""
-        _known = {
-            "CC1AD845": "Default Media Receiver",
-            "E8C28D3C": "Backdrop",
-            "YouTube":  "YouTube",
-            "233637DE": "YouTube",
-            "2DB7CC49": "Google Play Music",
-            "4AADC7B0": "YouTube Music",
-            "B3DCF968": "Spotify",
-            "A9BCCB7C": "VLC",
-        }
-        return _known.get(app_id, app_id)
 
     def _handle_discovery(self, sock, msg, payload):
         """Handle urn:x-cast:com.google.cast.receiver.discovery messages."""
