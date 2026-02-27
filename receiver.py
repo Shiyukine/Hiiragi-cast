@@ -109,6 +109,63 @@ def _load_app_configs() -> dict:
 
 APP_CONFIGS: dict = _load_app_configs()
 
+# ---------------------------------------------------------------------------
+# Namespace cache — persists the sender-facing namespaces each IPC app reports
+# so we can include them in the INITIAL RECEIVER_STATUS sent at LAUNCH time.
+# Without this the sender locks in a namespace list at session-creation and
+# throws invalid_parameter when the receiver tries to use an unlisted namespace.
+# ---------------------------------------------------------------------------
+
+_NS_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "namespace_cache.json")
+
+# Internal-only namespaces that should NEVER be exposed to Cast senders.
+_NS_SENDER_HIDDEN = {
+    "urn:x-cast:com.google.cast.debugoverlay",
+    "urn:x-cast:com.google.cast.inject",
+    "urn:x-cast:com.google.cast.cac",
+}
+
+
+def _ns_cache_load() -> dict:
+    """Load the persisted namespace cache from disk.  Returns {} on failure."""
+    try:
+        with open(_NS_CACHE_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        log.info("NS_CACHE: Loaded namespace cache (%d app(s))", len(data))
+        return data
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        log.warning("NS_CACHE: Failed to read cache (%s)", exc)
+        return {}
+
+
+def _ns_cache_save(cache: dict):
+    """Persist the namespace cache to disk."""
+    try:
+        with open(_NS_CACHE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, indent=2)
+    except Exception as exc:
+        log.warning("NS_CACHE: Failed to save cache (%s)", exc)
+
+
+def _sender_namespaces(app_id: str, cache: dict) -> list:
+    """Return the sender-facing namespace dicts for *app_id*.
+
+    Uses the persisted cache when available; falls back to NS_MEDIA only.
+    NS_MEDIA is always included.
+    """
+    cached = cache.get(app_id, [])
+    ns_set = {NS_MEDIA}  # always present
+    for ns in cached:
+        if ns not in _NS_SENDER_HIDDEN and not ns.startswith("urn:x-cast:com.google.cast.tp"):
+            ns_set.add(ns)
+    return [{"name": ns} for ns in sorted(ns_set)]
+
+
+# In-memory namespace cache (shared across CastReceiver instances)
+_NS_CACHE: dict = _ns_cache_load()
+
 def _fetch_app_metadata(app_id: str) -> dict:
     """Fetch metadata for a given app ID from the baseconfig API."""
     url = "https://clients3.google.com/cast/chromecast/device/app?a=" + app_id
@@ -435,6 +492,21 @@ class CastReceiver:
             log.info("[%s] << DISCOVERY: %s", client_id, payload.get("type"))
             self._handle_discovery(sock, msg, payload)
         else:
+            # For active IPC apps, forward any app-specific namespace to the SDK
+            # instead of rejecting it.  This is needed for apps like Spotify that
+            # use their own namespace 
+            # alongside the standard media namespace.
+            if (self.applications and
+                    self._is_ipc_app(self.applications[0].get("appId", "")) and
+                    msg.payload_type == cast_channel_pb2.STRING):
+                log.info("[%s] << APP ns=%s  -> forwarding to IPC bridge",
+                         client_id, ns.split(":")[-1])
+
+                if cast_ipc.is_connected:
+                    cast_ipc.send_message(ns, msg.source_id, msg.payload_utf8)
+                else:
+                    self._ipc_pending.append((ns, msg.source_id, msg.payload_utf8))
+                return
             log.info("[%s] << UNKNOWN ns=%s", client_id, ns)
             if msg.payload_type == cast_channel_pb2.STRING:
                 log.info("    payload: %s", msg.payload_utf8[:200])
@@ -612,10 +684,7 @@ class CastReceiver:
                 "displayName": app_name,
                 "isIdleScreen": False,
                 "launchedFromCloud": False,
-                "namespaces": [
-                    {"name": NS_MEDIA},
-                    {"name": "urn:x-cast:com.google.cast.cac"},
-                ],
+                "namespaces": _sender_namespaces(app_id, _NS_CACHE),
                 "sessionId": transport_id,   # same as transportId
                 "statusText": "Hiiragi Cast - " + app_name,
                 "transportId": transport_id,
@@ -731,6 +800,42 @@ class CastReceiver:
         # Wire callbacks on the global IPC bridge singleton
         def on_sdk_ready():
             log.info("[IPC] SDK ready \u2014 sending senderConnected for tracked senders")
+            # Update the running app's namespace list from what the SDK registered
+            # so that RECEIVER_STATUS reflects app-specific namespaces (e.g. Spotify).
+            if self.applications and cast_ipc.active_namespaces:
+                # Filter to sender-facing namespaces only.
+                ns_list = [{"name": ns} for ns in cast_ipc.active_namespaces
+                           if ns not in _NS_SENDER_HIDDEN
+                           and not ns.startswith("urn:x-cast:com.google.cast.tp")]
+                # Always include NS_MEDIA
+                if not any(n["name"] == NS_MEDIA for n in ns_list):
+                    ns_list.append({"name": NS_MEDIA})
+                self.applications[0]["namespaces"] = ns_list
+                log.info("[IPC] Updated app namespaces: %s",
+                         [n["name"].split(":")[-1] for n in ns_list])
+                # Persist to namespace cache so future LAUNCH responses are correct.
+                _NS_CACHE[app_id] = [n["name"] for n in ns_list]
+                _ns_cache_save(_NS_CACHE)
+                log.info("[IPC] Namespace cache updated for app %s", app_id)
+                # Push an updated RECEIVER_STATUS to all tracked senders so they
+                # learn about the app-specific namespace (e.g. Spotify's secure
+                # namespace) before any messages arrive on it.
+                updated_status = self._get_receiver_status()
+                with self._ipc_lock:
+                    sender_sockets = list(self._ipc_sender_sockets.items())
+                for sid, info in sender_sockets:
+                    if info:
+                        try:
+                            self._send_message(
+                                info[0],
+                                self._build_message(
+                                    "receiver-0", sid, NS_RECEIVER,
+                                    payload_utf8=json.dumps(updated_status)
+                                )
+                            )
+                            log.info("[IPC] Pushed updated RECEIVER_STATUS \u2192 %s", sid)
+                        except Exception as exc:
+                            log.warning("[IPC] Failed to push RECEIVER_STATUS to %s: %s", sid, exc)
             with self._ipc_lock:
                 senders = list(self._ipc_sender_sockets.keys())
             for sender_id in senders:
@@ -746,8 +851,13 @@ class CastReceiver:
         def on_ipc_message(namespace, client_id, data):
             self._ipc_to_cast_v2(namespace, client_id, data)
 
+        def on_sdk_disconnected():
+            # self._stop_ipc_app()
+            pass
+
         cast_ipc.on_sdk_ready = on_sdk_ready
         cast_ipc.on_message = on_ipc_message
+        cast_ipc.on_sdk_disconnected = on_sdk_disconnected
         log.info("[IPC] IPC bridge configured for app %s", app_id)
 
     def _stop_ipc_app(self):
@@ -793,6 +903,7 @@ class CastReceiver:
                 )
                 self._send_message(sock, msg)
                 log.info("[IPC\u2192Cast] %s \u2192 %s", namespace.split(":")[-1], sender_id)
+                log.debug("[IPC\u2192Cast] data: %s", data[:300])
             except Exception as exc:
                 log.warning("[IPC\u2192Cast] Failed to send to %s: %s", sender_id, exc)
 

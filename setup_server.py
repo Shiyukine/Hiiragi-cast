@@ -101,9 +101,15 @@ class CastIpcBridge:
         self._lock = threading.Lock()
         self.on_message: Optional[Callable] = None    # callable(namespace, sender_id, data_str)
         self.on_sdk_ready: Optional[Callable] = None  # callable()
+        self.on_sdk_disconnected: Optional[Callable] = None  # callable()
         # Must be populated by receiver.py before the SDK connects (or very
         # shortly after — the SDK waits for our reply before becoming "ready").
         self.launch_info: dict = {}  # keys: applicationId, applicationName, sessionId, ...
+        # Namespaces the SDK has registered (populated from its ready message)
+        self.active_namespaces: list = []
+        # Heartbeat state (set up when SDK sends startheartbeat)
+        self._hb_stop = threading.Event()
+        self._hb_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -140,6 +146,7 @@ class CastIpcBridge:
 
     def disconnect(self):
         """Close the IPC connection (e.g. when the app is stopped)."""
+        self._stop_heartbeat()
         with self._lock:
             sock = self._sock
             self._sock = None
@@ -160,6 +167,27 @@ class CastIpcBridge:
             "senderId": _IPC_SYSTEM_SENDER,
             "data": json.dumps(data_dict),
         }))
+
+    def _start_heartbeat(self, interval: float):
+        """Start a background thread that pings the SDK every *interval* seconds."""
+        self._stop_heartbeat()  # cancel any existing one
+        self._hb_stop.clear()
+        def _loop():
+            while not self._hb_stop.wait(timeout=interval):
+                if not self.is_connected:
+                    break
+                self._sys_send({"type": "ping"})
+                log.debug("[IPC] Heartbeat ping sent")
+        self._hb_thread = threading.Thread(target=_loop, daemon=True, name="IPC-heartbeat")
+        self._hb_thread.start()
+        log.debug("[IPC] Heartbeat started (interval=%.0fs)", interval)
+
+    def _stop_heartbeat(self):
+        """Cancel the heartbeat thread if running."""
+        self._hb_stop.set()
+        if self._hb_thread and self._hb_thread.is_alive():
+            self._hb_thread.join(timeout=2)
+        self._hb_thread = None
 
     def _send(self, text: str):
         with self._lock:
@@ -212,9 +240,15 @@ class CastIpcBridge:
         except Exception as exc:
             log.debug("[IPC] Connection closed: %s", exc)
         finally:
+            self._stop_heartbeat()
             with self._lock:
                 if self._sock is raw_sock:
                     self._sock = None
+            if self.on_sdk_disconnected:
+                try:
+                    self.on_sdk_disconnected()
+                except Exception as exc:
+                    log.warning("[IPC] on_sdk_disconnected error: %s", exc)
             log.info("[IPC] Cast SDK disconnected")
 
     def _dispatch(self, msg: dict):
@@ -239,9 +273,11 @@ class CastIpcBridge:
             msg_type = data.get("type", "")
 
             if msg_type == "ready":
+                active_ns = data.get("activeNamespaces", [])
+                self.active_namespaces = active_ns
                 log.info(
                     "[IPC] SDK sent 'ready': ver=%s namespaces=%s",
-                    data.get("version"), data.get("activeNamespaces"),
+                    data.get("version"), active_ns,
                 )
                 # Reply with the platform "ready" (app launch info) so the SDK
                 # fires its CastReceiverManager.ready event.
@@ -270,7 +306,16 @@ class CastIpcBridge:
                         log.warning("[IPC] on_sdk_ready error: %s", exc)
 
             else:
-                log.debug("[IPC] System msg type=%s from %s", msg_type, sender_id)
+                if msg_type == "startheartbeat":
+                    max_inactivity = data.get("maxInactivity", 600)
+                    interval = max(30.0, max_inactivity / 2)
+                    log.info("[IPC] Starting IPC heartbeat (maxInactivity=%ds, ping every %.0fs)",
+                             max_inactivity, interval)
+                    self._start_heartbeat(interval)
+                elif msg_type == "pong":
+                    log.debug("[IPC] Heartbeat pong received")
+                else:
+                    log.debug("[IPC] System msg type=%s from %s", msg_type, sender_id)
 
         else:
             # Non-system namespace (e.g. media): forward payload to callback.

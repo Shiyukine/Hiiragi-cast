@@ -90,8 +90,11 @@
         </div>
     </div>
 
-    <!-- Cast SDK receiver (Default Media Receiver, etc.) loads here -->
-    <iframe id="cast-webview" frameBorder="0" allow="autoplay; encrypted-media" src="about:blank">
+    <!-- Cast SDK receiver app loads here.
+         cast-webview-preload.js runs inside this iframe too
+         (nodeIntegrationInSubFrames: true) and injects window.cast.__platform__
+         before any page scripts execute. -->
+    <iframe id="cast-webview" src="about:blank" frameborder="0" allow="autoplay; encrypted-media; fullscreen">
     </iframe>
     <script src="renderer.js"></script>
 </body>
