@@ -48,6 +48,7 @@ class MediaBridge:
         self._video_latest: object = None   # bytes or None
         self._video_lock   = threading.Lock()
         self._video_sending: bool = False   # accessed only from asyncio thread
+        self._ws_server    = None           # websockets.Server instance
 
     # ------------------------------------------------------------------ #
     #  Public API (called from receiver thread)                            #
@@ -174,12 +175,45 @@ class MediaBridge:
     #  Internal asyncio loop (runs in background thread)                  #
     # ------------------------------------------------------------------ #
 
+    def stop(self):
+        """Cleanly stop the WebSocket server and its event loop."""
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread:
+            self._thread.join(timeout=3)
+
     def _run(self):
-        self._loop = asyncio.new_event_loop()
+        # Use SelectorEventLoop on Windows — ProactorEventLoop (the default)
+        # modifies the Windows console mode for async I/O and does not restore
+        # it if the loop is abandoned, leaving PowerShell non-interactive after
+        # process exit.
+        import sys as _sys
+        if _sys.platform == "win32":
+            self._loop = asyncio.SelectorEventLoop()
+        else:
+            self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._serve())
+
+        # Start the WebSocket server, then run_forever().
+        # run_forever() returns cleanly when loop.stop() is called (from stop()),
+        # unlike run_until_complete(Future()) which raises RuntimeError on stop().
+        self._loop.run_until_complete(self._start_server())
+        self._loop.run_forever()
+        # Cleanup after loop.stop()
+        try:
+            if self._ws_server:
+                self._ws_server.close()
+                self._loop.run_until_complete(self._ws_server.wait_closed())
+        except Exception:
+            pass
+        self._loop.close()
+
+    async def _start_server(self):
+        self._ws_server = await websockets.serve(self._handler, self.host, self.port)
+        self._ready.set()
 
     async def _serve(self):
+        # Kept for compatibility; not used in normal operation.
         async with websockets.serve(self._handler, self.host, self.port):
             self._ready.set()
             await asyncio.Future()  # run forever

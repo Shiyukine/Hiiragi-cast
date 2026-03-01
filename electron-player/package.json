@@ -4,7 +4,10 @@
     "description": "Electron video player for Hiiragi Cast receiver",
     "main": "main.js",
     "scripts": {
-        "start": "electron ."
+        "start": "electron .",
+        "startFix": "unset CHROME_DESKTOP && electron .",
+        "startFixMac": "cd node_modules/electron && rm -r dist && npm run postinstall && cd ../.. && electron .",
+        "signWin": "py -m castlabs_evs.vmp sign-pkg .\\node_modules\\electron\\dist"
     },
     "dependencies": {
         "hls.js": "^1.5.0",

@@ -5,91 +5,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hiiragi Cast Player</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        html,
-        body {
-            width: 100%;
-            height: 100%;
-            background: #000;
-            color: #fff;
-            font-family: 'Segoe UI', Arial, sans-serif;
-            overflow: hidden;
-            user-select: none;
-        }
-
-        #idle {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 16px;
-            background: radial-gradient(ellipse at center, #1a1a2e 0%, #000 100%);
-            transition: opacity .4s;
-        }
-
-        #idle.hidden {
-            opacity: 0;
-            pointer-events: none;
-        }
-
-        #idle .logo {
-            font-size: 48px;
-            font-weight: 700;
-            background: linear-gradient(135deg, #6c63ff, #ff6584);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-
-        #idle .sub {
-            font-size: 16px;
-            color: #888;
-        }
-
-        #status-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: #444;
-            display: inline-block;
-            margin-right: 6px;
-            transition: background .3s;
-        }
-
-        #status-dot.connected {
-            background: #4caf50;
-        }
-
-        /* Cast SDK receiver app */
-        #cast-webview {
-            position: absolute;
-            inset: 0;
-            width: 100%;
-            height: 100%;
-            opacity: 0;
-        }
-
-        /* Chrome Tab Mirroring — sits after the iframe in DOM so it paints on top */
-        #mirror-canvas {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            display: none;
-            background: #000;
-        }
-    </style>
+    <link rel="stylesheet" href="main.css">
 </head>
 
 <body>
+    <div id="window-top-bar">
 
+    </div>
     <!-- Idle / waiting screen -->
     <div id="idle">
         <div class="logo">Hiiragi Cast</div>
@@ -97,6 +19,19 @@
             <span id="status-dot"></span>
             <span id="status-text">Connecting to receiver…</span>
         </div>
+    </div>
+    <div id="overlay">
+        <button id="fullscreen">
+            <span id="fullscreen-text">Use fullscreen</span>
+            <svg xmlns="http://www.w3.org/2000/svg" id="fullscreen-svg" viewBox="0 0 24 24" width="36" height="36"
+                fill="currentColor">
+                <path d="M19,24H17a1,1,0,0,1,0-2h2a3,3,0,0,0,3-3V17a1,1,0,0,1,2,0v2A5.006,5.006,0,0,1,19,24Z" />
+                <path d="M1,8A1,1,0,0,1,0,7V5A5.006,5.006,0,0,1,5,0H7A1,1,0,0,1,7,2H5A3,3,0,0,0,2,5V7A1,1,0,0,1,1,8Z" />
+                <path d="M7,24H5a5.006,5.006,0,0,1-5-5V17a1,1,0,0,1,2,0v2a3,3,0,0,0,3,3H7a1,1,0,0,1,0,2Z" />
+                <path
+                    d="M23,8a1,1,0,0,1-1-1V5a3,3,0,0,0-3-3H17a1,1,0,0,1,0-2h2a5.006,5.006,0,0,1,5,5V7A1,1,0,0,1,23,8Z" />
+            </svg>
+        </button>
     </div>
 
     <iframe id="cast-webview" src="about:blank" frameborder="0" allow="autoplay; encrypted-media; fullscreen">

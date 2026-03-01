@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, webFrameMain } = require('electron');
 app.commandLine.appendSwitch('disable-site-isolation-trials')
 const path = require('path');
 app.userAgentFallback = "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 CrKey/1.56.467165";
@@ -12,17 +12,24 @@ function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1280,
         height: 720,
+        titleBarStyle: process.platform == "darwin" ? "hiddenInset" : "hidden",
+        trafficLightPosition: { x: 10, y: 12 },
+        //frame: process.platform != "win32",
+        ...(process.platform === 'win32' ? {
+            titleBarOverlay: {
+                color: '#00000000',
+                symbolColor: '#ffffff',
+                height: 35
+            }
+        } : {}),
         backgroundColor: '#000',
         title: 'Hiiragi Cast Player',
         icon: path.join(__dirname, 'assets', 'icon.png'),
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
-            nodeIntegration: false,
             // Allow playback of any content URL (CORS bypass for cast streams)
             webSecurity: false,
-            // Required for <webview> tag to work in the renderer
-            webviewTag: true,
         },
     });
 
@@ -32,11 +39,40 @@ function createWindow() {
         delete responseHeaders['x-frame-options'];
         delete responseHeaders['content-security-policy-report-only'];
         delete responseHeaders['content-security-policy'];
-        delete responseHeaders[''];
         callback({ cancel: false, responseHeaders });
     });
 
     mainWindow.setMenuBarVisibility(false);
+
+    /**
+     * soon :)
+     *
+    mainWindow.webContents.on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => {
+        if (!url.includes('youtube.com') && !url.includes('youtu.be')) return;
+        try {
+            const _YT_QUALITY_SCRIPT = `(function forceMaxQuality() {
+                var p = document.querySelector('.html5-video-player');
+                if (!p || typeof p.getAvailableQualityLevels !== 'function') {
+                    return setTimeout(forceMaxQuality, 800);
+                }
+                var levels = p.getAvailableQualityLevels();
+                if (!levels || levels.length === 0) {
+                    return setTimeout(forceMaxQuality, 800);
+                }
+                var current = p.getPlaybackQuality();
+                var best = "hd2160";
+                if (current != best) {
+                    try { p.setPlaybackQualityRange(best, best); } catch(e) {}
+                    try { p.setPlaybackQuality(best); } catch(e) {}
+                }
+                // Re-apply every 5 s in case auto-quality kicks back in
+                setTimeout(forceMaxQuality, 5000);
+            })();`;
+            webFrameMain.fromId(frameProcessId, frameRoutingId).executeJavaScript(_YT_QUALITY_SCRIPT);
+        } catch (e) {
+            console.warn('[Youtube inject] YouTube quality injection failed:', e);
+        }
+    });*/
 
     // Pass the bridge port to the renderer via query param
     mainWindow.loadURL(

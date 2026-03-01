@@ -154,6 +154,7 @@ Testing:
 
     # Start media bridge (optional Electron player)
     bridge = None
+    electron_proc = None
     if not args.no_electron:
         bridge = MediaBridge(port=args.bridge_port)
         bridge.start()
@@ -163,13 +164,35 @@ Testing:
                                      "electron-player")
         if os.path.isdir(electron_dir):
             log.info("Launching Electron player from %s", electron_dir)
-            # On Windows npm/npx are .cmd batch files and cannot be invoked as
-            # plain executables — shell=True is required.
-            subprocess.Popen("npm run start",
-                             cwd=electron_dir,
-                             shell=True,
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+            # CREATE_NO_WINDOW  — no console window shown
+            # CREATE_NEW_PROCESS_GROUP — Ctrl+C does not propagate to Electron
+            _flags = 0
+            if sys.platform == "win32":
+                _flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            electron_cmd = "npm run start"
+            if sys.platform == "linux" or sys.platform == "linux2": # Linux
+                electron_cmd = "npm run startFix"
+            if sys.platform == "darwin": # macOS
+                electron_cmd = "npm run startFixMac"
+            electron_proc = subprocess.Popen(
+                electron_cmd,
+                cwd=electron_dir,
+                shell=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_flags,
+            )
+            log.info("Electron player launched (pid=%d)", electron_proc.pid)
+
+            # When Electron closes, stop the Python server automatically.
+            def _electron_watchdog(proc):
+                proc.wait()   # blocks until npm/Electron process tree exits
+                log.info("Electron player closed — stopping server")
+                import signal as _sig, os as _os
+                _os.kill(_os.getpid(), _sig.SIGINT)
+            threading.Thread(target=_electron_watchdog, args=(electron_proc,),
+                             daemon=True, name="ElectronWatchdog").start()
         else:
             log.warning("Electron player directory not found: %s", electron_dir)
             log.warning("Run: cd electron-player && npm install")
@@ -261,11 +284,39 @@ Testing:
     except Exception as e:
         log.error("Receiver error: %s", e)
     finally:
+        # Kill the Electron process tree before anything else.
+        # taskkill /T kills npm + all its children (the actual Electron process).
+        if electron_proc is not None:
+            try:
+                if sys.platform == "win32":
+                    import subprocess as _sp
+                    _sp.run(["taskkill", "/F", "/T", "/PID", str(electron_proc.pid)],
+                            capture_output=True, check=False)
+                else:
+                    import signal as _sig
+                    electron_proc.send_signal(_sig.SIGTERM)
+                    electron_proc.wait(timeout=3)
+            except Exception:
+                pass
+        if bridge:
+            bridge.stop()
         if advertiser:
             advertiser.stop()
         if ssdp_srv:
             ssdp_srv.stop()
         log.info("Shutdown complete.")
+        # Zeroconf (mDNS) starts non-daemon threads internally.  If they haven't
+        # finished by now, Python's normal shutdown will block waiting for them —
+        # and never reach the C-level console-mode restore, leaving the terminal
+        # broken.  Marking every remaining non-daemon thread as daemon here lets
+        # Python exit immediately while still running its own finaliser cleanly.
+        import threading as _threading
+        for _t in _threading.enumerate():
+            if _t is not _threading.main_thread() and not _t.daemon:
+                try:
+                    _t.daemon = True
+                except RuntimeError:
+                    pass
 
 
 if __name__ == "__main__":

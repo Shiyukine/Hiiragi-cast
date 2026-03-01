@@ -1,0 +1,150 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+@font-face {
+    font-family: Comfortaa;
+    src: url("./assets/font.ttf") format("truetype");
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    background: #000;
+    color: #fff;
+    font-family: 'Comfortaa',
+        'Segoe UI',
+        Arial,
+        sans-serif;
+    overflow: hidden;
+    user-select: none;
+}
+
+#idle {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: radial-gradient(ellipse at center, #1a1a2e 0%, #000 100%);
+    transition: opacity .4s;
+}
+
+#idle.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+#idle .logo {
+    font-size: 48px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #6c63ff, #ff6584);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+#idle .sub {
+    font-size: 16px;
+    color: #888;
+}
+
+#status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #444;
+    display: inline-block;
+    margin-right: 6px;
+    transition: background .3s;
+}
+
+#status-dot.connected {
+    background: #4caf50;
+}
+
+/* Cast SDK receiver app */
+#cast-webview {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* Chrome Tab Mirroring — sits after the iframe in DOM so it paints on top */
+#mirror-canvas {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: none;
+    background: #000;
+}
+
+#overlay {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    transition: opacity .3s;
+    width: 100%;
+    height: 100%;
+}
+
+#overlay>* {
+    opacity: 0;
+    transition: all .3s;
+}
+
+#overlay.visible {
+    opacity: 1;
+    pointer-events: all;
+    z-index: 10;
+    display: initial;
+}
+
+#overlay button {
+    padding: 12px 24px;
+    font-size: 16px;
+    color: #fff;
+    border: none;
+    border-radius: 15px;
+    cursor: pointer;
+}
+
+#overlay #fullscreen {
+    backdrop-filter: blur(20px);
+    background: rgba(0, 0, 0, 0.3);
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    display: flex;
+    flex-direction: row-reverse;
+    align-items: center;
+    gap: 16px;
+    font-size: 20px;
+    font-family: 'Comfortaa', 'Segoe UI', Arial, sans-serif;
+    transition: all .3s;
+}
+
+#overlay #fullscreen:hover {
+    transform: scale(1.03);
+}
+
+#overlay #fullscreen:active {
+    transform: scale(0.97);
+}
+
+#window-top-bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 35px;
+    -webkit-app-region: drag;
+}

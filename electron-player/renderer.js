@@ -83,6 +83,85 @@ function setConnected(yes) {
     statusText.textContent = yes ? 'Waiting for cast…' : 'Connecting to receiver…';
 }
 
+function showOverlay() {
+    const overlay = document.getElementById('overlay');
+    overlay.classList.add('visible');
+
+    document.body.style.cursor = 'default';
+
+    setTimeout(() => {
+        if (overlay.classList.contains('visible')) {
+            for (const btn of overlay.children) {
+                btn.style.opacity = '1';
+            }
+        }
+    }, 10);
+}
+
+function hideOverlay() {
+    const overlay = document.getElementById('overlay');
+    for (const btn of overlay.children) {
+        btn.style.opacity = '0';
+    }
+    setTimeout(() => {
+        overlay.classList.remove('visible');
+    }, 300);
+
+    if (fullscreen) {
+        document.body.style.cursor = 'none';
+    }
+}
+
+let overlayTimeout = null;
+window.addEventListener('mousemove', () => {
+    showOverlay();
+    clearTimeout(overlayTimeout);
+    overlayTimeout = setTimeout(() => {
+        hideOverlay();
+    }, 3000);
+});
+
+let fullscreen = false;
+const fullscreenSvgs = {
+    expand: [
+        "M19,24H17a1,1,0,0,1,0-2h2a3,3,0,0,0,3-3V17a1,1,0,0,1,2,0v2A5.006,5.006,0,0,1,19,24Z",
+        "M1,8A1,1,0,0,1,0,7V5A5.006,5.006,0,0,1,5,0H7A1,1,0,0,1,7,2H5A3,3,0,0,0,2,5V7A1,1,0,0,1,1,8Z",
+        "M7,24H5a5.006,5.006,0,0,1-5-5V17a1,1,0,0,1,2,0v2a3,3,0,0,0,3,3H7a1,1,0,0,1,0,2Z",
+        "M23,8a1,1,0,0,1-1-1V5a3,3,0,0,0-3-3H17a1,1,0,0,1,0-2h2a5.006,5.006,0,0,1,5,5V7A1,1,0,0,1,23,8Z",
+    ],
+    compress: [
+        "M7,0A1,1,0,0,0,6,1V3A3,3,0,0,1,3,6H1A1,1,0,0,0,1,8H3A5.006,5.006,0,0,0,8,3V1A1,1,0,0,0,7,0Z",
+        "M23,16H21a5.006,5.006,0,0,0-5,5v2a1,1,0,0,0,2,0V21a3,3,0,0,1,3-3h2a1,1,0,0,0,0-2Z",
+        "M21,8h2a1,1,0,0,0,0-2H21a3,3,0,0,1-3-3V1a1,1,0,0,0-2,0V3A5.006,5.006,0,0,0,21,8Z",
+        "M3,16H1a1,1,0,0,0,0,2H3a3,3,0,0,1,3,3v2a1,1,0,0,0,2,0V21A5.006,5.006,0,0,0,3,16Z",
+    ],
+}
+
+function setFullscreenIcon(isFullscreen) {
+    const paths = isFullscreen ? fullscreenSvgs.compress : fullscreenSvgs.expand;
+    const svg = document.getElementById('fullscreen-svg');
+    while (svg.firstChild) {
+        svg.removeChild(svg.firstChild);
+    }
+    for (const d of paths) {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', d);
+        svg.appendChild(path);
+    }
+}
+
+document.getElementById("fullscreen").addEventListener('click', () => {
+    if (fullscreen) {
+        document.exitFullscreen();
+        document.getElementById('fullscreen-text').innerText = 'Use fullscreen';
+    } else {
+        document.documentElement.requestFullscreen();
+        document.getElementById('fullscreen-text').innerText = 'Exit fullscreen';
+    }
+    setFullscreenIcon(!fullscreen);
+    fullscreen = !fullscreen;
+});
+
 // ── Cast event handlers ───────────────────────────────────────────────────────
 const handlers = {
     // Chrome Tab Mirroring — display WebRTC frames on canvas
