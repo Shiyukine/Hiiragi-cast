@@ -866,12 +866,8 @@ class CastWebRTCSession:
     def _recv_loop(self):
         log.info("[CastStream] Receive loop started")
         first_pkt = True
-        _pkt_log_count = 0    # log first 50 packets verbosely
         _loop_start = time.monotonic()
         _video_warned = False
-        _first_vid_hex_done = False   # dump raw bytes of first video packet once
-        _first_aud_hex_done = False   # dump raw bytes of first audio packet once
-        _aud_hdr_fail_count = 0       # count Cast-header parse failures for audio
 
         while not self._stop.is_set():
             try:
@@ -903,11 +899,6 @@ class CastWebRTCSession:
 
             result = _parse_rtp(raw)
             if result is None:
-                # Could be RTCP or malformed — log first few
-                if _pkt_log_count < 50:
-                    log.debug("[CastStream] Non-RTP packet from %s:%d len=%d b0=%02x b1=%02x",
-                              addr[0], addr[1], len(raw),
-                              raw[0] if raw else 0, raw[1] if len(raw)>1 else 0)
                 continue
             pt, ssrc, seq, timestamp, marker, payload, frame_id, packet_id, max_packet_id = result
 
@@ -915,59 +906,6 @@ class CastWebRTCSession:
                 log.info("[CastStream] First RTP: ssrc=%d pt=%d len=%d",
                          ssrc, pt, len(payload))
                 first_pkt = False
-
-            # Verbose packet log for first 50 RTP packets (helps diagnose SSRCs)
-            if _pkt_log_count < 50:
-                _pkt_log_count += 1
-                a_ssrc = self._audio_cfg.ssrc if self._audio_cfg else -1
-                v_ssrc = self._video_cfg.ssrc if self._video_cfg else -1
-                kind = "AUD" if ssrc == a_ssrc else ("VID" if ssrc == v_ssrc else "UNK")
-                log.info("[CastStream] pkt#%d %s ssrc=%d pt=%d seq=%d ts=%d mk=%d "
-                         "fid=%s len=%d",
-                         _pkt_log_count, kind, ssrc, pt, seq, timestamp,
-                         int(marker), frame_id, len(payload))
-
-            # Hex dump the first video packet — parse RTP header fields explicitly
-            if not _first_vid_hex_done and self._video_cfg and ssrc == self._video_cfg.ssrc:
-                _first_vid_hex_done = True
-                b0 = raw[0]; b1 = raw[1]
-                has_ext_bit = bool((b0 >> 4) & 1)
-                cc_count    = b0 & 0xF
-                ext_offset  = 12 + cc_count * 4
-                log.info("[CastStream] --- FIRST VIDEO PACKET DIAGNOSTIC ---")
-                log.info("[CastStream]   raw[0:64] = %s", raw[:64].hex())
-                log.info("[CastStream]   b0=0x%02x  version=%d ext_bit=%d cc=%d",
-                         b0, b0>>6, has_ext_bit, cc_count)
-                log.info("[CastStream]   b1=0x%02x  marker=%d pt=%d",
-                         b1, (b1>>7)&1, b1&0x7F)
-                log.info("[CastStream]   payload offset=%d  payload[0:8]=%s",
-                         ext_offset if not has_ext_bit else "?",
-                         payload[:8].hex())
-                if has_ext_bit and len(raw) >= ext_offset + 4:
-                    ep = struct.unpack_from(">H", raw, ext_offset)[0]
-                    el = struct.unpack_from(">H", raw, ext_offset+2)[0]
-                    body_start = ext_offset + 4
-                    body_end   = body_start + el * 4
-                    log.info("[CastStream]   ext profile=0x%04X len_words=%d "
-                             "body[0:16]=%s",
-                             ep, el, raw[body_start:body_start+16].hex())
-                    # Walk ALL elements and log each one
-                    i = body_start
-                    while i < body_end and i < len(raw):
-                        hbyte = raw[i]
-                        if hbyte == 0x00:
-                            i += 1; continue
-                        if hbyte == 0xFF:
-                            break
-                        eid = (hbyte >> 4) & 0xF
-                        elen = (hbyte & 0xF) + 1
-                        edata = raw[i+1:i+1+elen] if i+1+elen <= len(raw) else b""
-                        log.info("[CastStream]   ext element: id=%d len=%d "
-                                 "data=%s", eid, elen, edata.hex())
-                        i += 1 + elen
-                else:
-                    log.info("[CastStream]   NO RTP EXTENSION (has_ext_bit=0)")
-                log.info("[CastStream] --- END DIAGNOSTIC ---")
 
             # Periodic warning if video decoding never succeeds
             if not _video_warned and not self._got_video_frame:
@@ -988,12 +926,6 @@ class CastWebRTCSession:
                 cast_buf = self._audio_buf
                 is_video = False
                 self._audio_highest_seq = seq
-                if not _first_aud_hex_done:
-                    _first_aud_hex_done = True
-                    log.info("[CastStream] --- FIRST AUDIO PACKET DIAGNOSTIC ---")
-                    log.info("[CastStream]   payload[0:16] = %s", payload[:16].hex())
-                    log.info("[CastStream]   payload len=%d", len(payload))
-                    log.info("[CastStream] --- END AUDIO DIAGNOSTIC ---")
             elif self._video_cfg and ssrc == self._video_cfg.ssrc:
                 cfg      = self._video_cfg
                 ts_buf   = self._video_ts_buf
@@ -1030,11 +962,9 @@ class CastWebRTCSession:
             result2 = _parse_cast_payload_header(payload)
             if result2 is None:
                 if not is_video:
-                    _aud_hdr_fail_count += 1
-                    if _aud_hdr_fail_count <= 5:
-                        log.warning("[CastStream] AUD Cast header parse FAILED "
-                                    "(#%d) payload[0:8]=%s len=%d",
-                                    _aud_hdr_fail_count, payload[:8].hex(), len(payload))
+                    log.warning("[CastStream] AUD Cast header parse FAILED "
+                                "payload[0:8]=%s len=%d",
+                                payload[:8].hex(), len(payload))
                 continue
             hdr_fid, hdr_pkt_id, hdr_max_pkt_id, c_off = result2
             payload = payload[c_off:]
@@ -1047,27 +977,6 @@ class CastWebRTCSession:
                 frame_id      = hdr_fid
                 packet_id     = hdr_pkt_id
                 max_packet_id = hdr_max_pkt_id
-            if is_video:
-                if not hasattr(self, '_vid_hdr_log_count'):
-                    self._vid_hdr_log_count = 0
-                if self._vid_hdr_log_count < 5:
-                    self._vid_hdr_log_count += 1
-                    log.info("[CastStream] VID hdr #%d: fid=%d pkt=%d/%d "
-                             "cipher_off=%d cipher_len=%d",
-                             self._vid_hdr_log_count,
-                             frame_id, packet_id, max_packet_id,
-                             c_off, len(payload))
-            else:
-                if not hasattr(self, '_aud_hdr_log_count'):
-                    self._aud_hdr_log_count = 0
-                if self._aud_hdr_log_count < 10:
-                    self._aud_hdr_log_count += 1
-                    log.info("[CastStream] AUD hdr #%d: fid=%d pkt=%d/%d "
-                             "cipher_off=%d cipher_len=%d",
-                             self._aud_hdr_log_count,
-                             frame_id, packet_id, max_packet_id,
-                             c_off, len(payload))
-
             # Reassemble multi-packet frames.
             # Prefer Cast RTP extension frame_id; also works with frame_id
             # extracted from Cast payload header above.
@@ -1119,17 +1028,6 @@ class CastWebRTCSession:
                             self._udp_sock.sendto(ack, ack_addr)
                         except OSError:
                             pass
-                if not hasattr(self, '_asm_count_vid'):
-                    self._asm_count_vid = 0
-                    self._asm_count_aud = 0
-                if is_video and self._asm_count_vid < 5:
-                    self._asm_count_vid += 1
-                    log.info("[CastStream] VID frame assembled #%d: fid=%d size=%d bytes",
-                             self._asm_count_vid, aes_fid, len(raw_frame))
-                elif not is_video and self._asm_count_aud < 10:
-                    self._asm_count_aud += 1
-                    log.info("[CastStream] AUD frame assembled #%d: fid=%d size=%d bytes",
-                             self._asm_count_aud, aes_fid, len(raw_frame))
             else:
                 # Truly no framing info: reassemble by RTP timestamp + marker bit
                 raw_frame = ts_buf.add(timestamp, seq, marker, payload)
@@ -1242,8 +1140,6 @@ class CastWebRTCSession:
         if not self._sd_stream:
             log.warning("[CastStream] _decode_audio called but no sd_stream (fid=%d)", fid)
             return
-        if not hasattr(self, '_aud_decode_count'):
-            self._aud_decode_count = 0
         try:
             pkt = _av.Packet(data)
             frames_out = 0
@@ -1278,10 +1174,6 @@ class CastWebRTCSession:
                     except queue.Empty: pass
                     try: self._aud_play_queue.put_nowait(arr)
                     except queue.Full: pass
-            self._aud_decode_count += 1
-            if self._aud_decode_count <= 5:
-                log.info("[CastStream] AUD decoded #%d: fid=%d in=%d bytes frames_out=%d",
-                         self._aud_decode_count, fid, len(data), frames_out)
         except Exception as e:
             log.warning("[CastStream] Audio decode error (fid=%d len=%d): %s", fid, len(data), e)
 
@@ -1313,8 +1205,6 @@ class CastWebRTCSession:
         sounddevice.  Keeping sd.write() off the receive thread ensures that
         a momentarily-full hardware buffer never stalls UDP packet reading.
         """
-        write_count = 0
-        err_count   = 0
         while True:
             arr = self._aud_play_queue.get()
             if arr is None:   # sentinel from close()
@@ -1322,18 +1212,10 @@ class CastWebRTCSession:
             if self._sd_stream:
                 try:
                     self._sd_stream.write(arr)
-                    write_count += 1
-                    if write_count <= 5:
-                        peak = float(np.abs(arr).max())
-                        log.info("[CastStream] sd.write #%d: shape=%s dtype=%s peak=%.4f device=%s",
-                                 write_count, arr.shape, arr.dtype, peak,
-                                 self._sd_stream.device)
                 except Exception as e:
-                    err_count += 1
-                    if err_count <= 10:
-                        log.warning("[CastStream] sd.write error #%d: %s "
-                                    "(shape=%s dtype=%s)",
-                                    err_count, e, arr.shape, arr.dtype)
+                    log.warning("[CastStream] sd.write error: %s "
+                                "(shape=%s dtype=%s)",
+                                e, arr.shape, arr.dtype)
 
     def _vid_dec_loop(self):
         """Worker thread: pulls (dec_frame, raw_frame) tuples from
@@ -1386,13 +1268,6 @@ class CastWebRTCSession:
                                      " - disabling decrypt for video stream")
                             self._video_no_decrypt = True
                         self._got_video_frame = True
-                    if not hasattr(self, '_vid_decode_frame_count'):
-                        self._vid_decode_frame_count = 0
-                    self._vid_decode_frame_count += 1
-                    if self._vid_decode_frame_count <= 10:
-                        log.info("[CastStream] video frame #%d decoded (%s): %dx%d pkt_size=%d in[0:4]=%s",
-                                 self._vid_decode_frame_count, label,
-                                 frame.width, frame.height, len(payload), payload[:4].hex())
                     self._vid_err_count = 0
                     # Rate-limit MJPEG encode: VP9 decode always runs (decoder
                     # state must stay continuous), but the expensive reformat +
