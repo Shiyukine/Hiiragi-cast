@@ -84,10 +84,6 @@
             transform: translate(-50%, -50%);
             display: none;
             background: #000;
-            /* JS sets style.width/height to letterbox-fit the window on every
-               resize. The GPU compositor then scales the drawing buffer pixels
-               (video resolution) to those CSS pixels using Lanczos filtering. */
-            image-rendering: high-quality;
         }
     </style>
 </head>
@@ -103,10 +99,6 @@
         </div>
     </div>
 
-    <!-- Cast SDK receiver app loads here.
-         cast-webview-preload.js runs inside this iframe too
-         (nodeIntegrationInSubFrames: true) and injects window.cast.__platform__
-         before any page scripts execute. -->
     <iframe id="cast-webview" src="about:blank" frameborder="0" allow="autoplay; encrypted-media; fullscreen">
     </iframe>
     <canvas id="mirror-canvas"></canvas>

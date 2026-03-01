@@ -583,10 +583,13 @@ class CastWebRTCSession:
     """
 
     def __init__(self, send_fn: Callable, is_audio_only: bool = False,
-                 frame_callback: Optional[Callable] = None):
+                 frame_callback: Optional[Callable] = None,
+                 audio_device=None):
         self._send_fn       = send_fn
         self._is_audio_only = is_audio_only
         self._frame_cb      = frame_callback
+        # None = auto-select; int = device index; str = name substring
+        self._audio_device  = audio_device
 
         self._udp_sock: Optional[socket.socket] = None
         self._stop          = threading.Event()
@@ -815,10 +818,19 @@ class CastWebRTCSession:
 
         if _HAVE_SD and self._audio_cfg:
             try:
-                # sd.default.device is (input, output); -1 means "not set".
-                out_device = sd.default.device[1]
-                if out_device == -1:
-                    out_device = None   # let PortAudio pick the system default
+                # Determine output device:
+                #   --audio-device N       → integer index
+                #   --audio-device "name"  → name substring (sounddevice resolves it)
+                #   not specified          → sd.default.device[1], fallback None
+                if self._audio_device is not None:
+                    try:
+                        out_device = int(self._audio_device)
+                    except (ValueError, TypeError):
+                        out_device = self._audio_device   # string name substring
+                else:
+                    out_device = sd.default.device[1]
+                    if out_device == -1:
+                        out_device = None   # let PortAudio pick the system default
                 try:
                     dev_name = sd.query_devices(out_device)['name'] if out_device is not None else 'system default'
                 except Exception:
@@ -1213,9 +1225,50 @@ class CastWebRTCSession:
                 try:
                     self._sd_stream.write(arr)
                 except Exception as e:
-                    log.warning("[CastStream] sd.write error: %s "
-                                "(shape=%s dtype=%s)",
-                                e, arr.shape, arr.dtype)
+                    log.warning("[CastStream] sd.write error: %s — attempting device fallback", e)
+                    self._try_next_audio_device(arr)
+
+    def _try_next_audio_device(self, arr):
+        """Close the current broken audio stream and reopen on the next working
+        output device.  Tries every device in index order, skipping the one that
+        just failed.  Writes *arr* on the newly opened device if successful."""
+        if not _HAVE_SD or not self._audio_cfg:
+            return
+        failed_device = self._sd_stream.device if self._sd_stream else None
+        # Close broken stream
+        try:
+            if self._sd_stream:
+                self._sd_stream.close()
+        except Exception:
+            pass
+        self._sd_stream = None
+
+        try:
+            devs = sd.query_devices()
+        except Exception:
+            return
+
+        sr  = self._audio_cfg.sample_rate
+        ch  = self._audio_cfg.channels
+
+        for i, d in enumerate(devs):
+            if d['max_output_channels'] < 1:
+                continue
+            if i == failed_device:
+                continue
+            try:
+                stream = sd.OutputStream(samplerate=sr, channels=ch,
+                                         dtype="float32", device=i)
+                stream.start()
+                stream.write(arr)   # probe — if this raises, device is broken too
+                self._sd_stream = stream
+                log.info("[CastStream] Audio switched to device %d: %s", i, d['name'])
+                return
+            except Exception:
+                try: stream.close()
+                except Exception: pass
+
+        log.warning("[CastStream] No working audio output device found")
 
     def _vid_dec_loop(self):
         """Worker thread: pulls (dec_frame, raw_frame) tuples from

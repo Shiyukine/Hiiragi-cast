@@ -75,8 +75,29 @@ Testing:
                         help="Don't start the Electron player and stream media events to it")
     parser.add_argument("--bridge-port", type=int, default=9000,
                         help="WebSocket port for Electron bridge (default: 9000)")
+    parser.add_argument("--audio-device", default=None, metavar="DEVICE",
+                        help="Audio output device: index number or name substring "
+                             "(run with --list-audio-devices to see available devices)")
+    parser.add_argument("--list-audio-devices", action="store_true",
+                        help="Print available audio output devices and exit")
 
     args = parser.parse_args()
+
+    if args.list_audio_devices:
+        try:
+            import sounddevice as _sd
+            devices = _sd.query_devices()
+            print("\nAvailable audio output devices:")
+            print(f"  {'IDX':>4}  {'NAME'}")
+            print("  " + "-" * 60)
+            for i, d in enumerate(devices):
+                if d['max_output_channels'] > 0:
+                    marker = " <-- default" if i == _sd.default.device[1] else ""
+                    print(f"  {i:>4}  {d['name']}{marker}")
+            print()
+        except ImportError:
+            print("sounddevice is not installed — cannot list devices")
+        sys.exit(0)
 
     # Resolve paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -231,6 +252,7 @@ Testing:
         media_bridge=bridge,
         friendly_name=args.name,
         device_id=advertiser.device_id if advertiser else None,
+        audio_device=args.audio_device,
     )
     try:
         receiver.start()

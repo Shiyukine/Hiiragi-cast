@@ -208,11 +208,12 @@ class CastReceiver:
 
     def __init__(self, cert_file, key_file, peer_cert_file=None, port=8009,
                  auth_crt_file=None, signatures_file=None, media_bridge=None,
-                 friendly_name="Hiiragi Cast", device_id=None):
+                 friendly_name="Hiiragi Cast", device_id=None, audio_device=None):
         self.cert_file = cert_file
         self.key_file = key_file
         self.peer_cert_file = peer_cert_file
         self.auth_crt_file = auth_crt_file
+        self.audio_device = audio_device
         self.signatures_file = signatures_file
         self.port = port
         self.friendly_name = friendly_name
@@ -818,6 +819,7 @@ class CastReceiver:
                 send_fn=send_fn,
                 is_audio_only=is_audio_only,
                 frame_callback=frame_cb,
+                audio_device=self.audio_device,
             )
             log.info("[WebRTC] Session created for app %s (audio_only=%s)",
                      app_id, is_audio_only)
