@@ -12,7 +12,7 @@ function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1280,
         height: 720,
-        titleBarStyle: process.platform == "darwin" ? "hiddenInset" : "hidden",
+        titleBarStyle: process.platform == "darwin" ? "hiddenInset" : (process.platform == "linux" ? "default" : "hidden"),
         trafficLightPosition: { x: 10, y: 12 },
         //frame: process.platform != "win32",
         ...(process.platform === 'win32' ? {
@@ -43,6 +43,15 @@ function createWindow() {
     });
 
     mainWindow.setMenuBarVisibility(false);
+
+    mainWindow.webContents.on('did-finish-load', () => {
+        if (process.platform === 'linux') {
+            mainWindow.webContents.insertCSS(`#window-top-bar {
+                display: none;
+            }`
+            );
+        }
+    });
 
     /**
      * soon :)

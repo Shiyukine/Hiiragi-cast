@@ -335,6 +335,8 @@ cast_ipc = CastIpcBridge()
 class _SetupHandler(BaseHTTPRequestHandler):
     # Injected by CastSetupServer.start()
     device_info: dict = {}
+    local_ip: str = "127.0.0.1"
+    http_port: int = 8008
 
     def log_message(self, fmt, *args):
         log.debug("Setup HTTP %s %s", self.address_string(), fmt % args)
@@ -365,14 +367,53 @@ class _SetupHandler(BaseHTTPRequestHandler):
                 f"<manufacturer>Google Inc.</manufacturer>"
                 f"<modelName>{d.get('model_name','Chromecast')}</modelName>"
                 f"<UDN>uuid:{d.get('uuid','')}</UDN>"
+                "<serviceList>"
+                "<service>"
+                "<serviceType>urn:dial-multiscreen-org:service:dial:1</serviceType>"
+                "<serviceId>urn:dial-multiscreen-org:serviceId:dial</serviceId>"
+                "<SCPDURL>/ssdp/dial.xml</SCPDURL>"
+                "</service>"
+                "</serviceList>"
                 "</device></root>"
             )
             body = xml.encode()
+            app_url = f"http://{self.local_ip}:{self.http_port}/apps"
             self.send_response(200)
-            self.send_header("Content-Type", "text/xml")
+            self.send_header("Content-Type", "text/xml; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            # DIAL spec §5.4 — this header is REQUIRED; its absence causes the
+            # "Missing or empty Application-URL" error in Cast sender apps.
+            self.send_header("Application-URL", app_url)
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
+
+        elif path == "/apps" or path.startswith("/apps/"):
+            # DIAL REST service — minimal implementation
+            # GET /apps          → list (not required by spec, return 404 is fine)
+            # GET /apps/<appId>  → app status (required for DIAL launch)
+            if path == "/apps":
+                self.send_response(404)
+                self.end_headers()
+            else:
+                app_id = path[6:]  # strip /apps/
+                # Return a minimal "stopped" state so Cast senders know
+                # the endpoint exists and can attempt to launch the app.
+                xml = (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    f'<service xmlns="urn:dial-multiscreen-org:schemas:dial">'
+                    f'<name>{app_id}</name>'
+                    f'<options allowStop="true"/>'
+                    f'<state>stopped</state>'
+                    f'</service>'
+                )
+                body = xml.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/xml; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
 
         elif path in ("/setup/icon.png", "/setup/icon.jpg"):
             # Return empty 204 — enough to satisfy the app
@@ -416,11 +457,12 @@ class CastSetupServer:
     """HTTP server on port 8008 that answers Google Home device validation."""
 
     def __init__(self, friendly_name, device_id, port=8008, cast_port=8009,
-                 device_model="Chromecast"):
+                 device_model="Chromecast", local_ip=""):
         import uuid as _uuid
         self.port = port
         self._server = None
         self._thread = None
+        self._local_ip = local_ip or "127.0.0.1"
 
         _SetupHandler.device_info = {
             # Core fields checked by Google Home app
@@ -465,6 +507,8 @@ class CastSetupServer:
         }
 
     def start(self):
+        _SetupHandler.local_ip = self._local_ip
+        _SetupHandler.http_port = self.port
         server = ThreadingHTTPServer(("0.0.0.0", self.port), _SetupHandler)
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever,

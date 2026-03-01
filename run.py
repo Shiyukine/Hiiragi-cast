@@ -227,10 +227,12 @@ Testing:
         advertiser = CastAdvertiser(args.name, args.port)
 
         # Setup HTTP server on port 8008 (required by Google Home app on phones)
+        _local_ip = advertiser._get_local_ip()
         setup_srv = CastSetupServer(
             friendly_name=args.name,
             device_id=advertiser.device_id,
             cast_port=args.port,
+            local_ip=_local_ip,
         )
         try:
             setup_srv.start()
