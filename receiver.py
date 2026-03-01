@@ -30,6 +30,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cast_channel_pb2
 from setup_server import cast_ipc
+from webrtc_handler import CastWebRTCSession
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,12 +41,19 @@ log = logging.getLogger("CastReceiver")
 
 # Cast V2 Namespaces
 NS_CONNECTION = "urn:x-cast:com.google.cast.tp.connection"
-NS_HEARTBEAT = "urn:x-cast:com.google.cast.tp.heartbeat"
-NS_RECEIVER = "urn:x-cast:com.google.cast.receiver"
-NS_AUTH = "urn:x-cast:com.google.cast.tp.deviceauth"
-NS_MEDIA = "urn:x-cast:com.google.cast.media"
-NS_SETUP = "urn:x-cast:com.google.cast.setup"
-NS_DISCOVERY = "urn:x-cast:com.google.cast.receiver.discovery"
+NS_HEARTBEAT  = "urn:x-cast:com.google.cast.tp.heartbeat"
+NS_RECEIVER   = "urn:x-cast:com.google.cast.receiver"
+NS_AUTH       = "urn:x-cast:com.google.cast.tp.deviceauth"
+NS_MEDIA      = "urn:x-cast:com.google.cast.media"
+NS_WEBRTC     = "urn:x-cast:com.google.cast.webrtc"
+NS_SETUP      = "urn:x-cast:com.google.cast.setup"
+NS_DISCOVERY  = "urn:x-cast:com.google.cast.receiver.discovery"
+
+# Chrome Tab/Audio Mirroring — use WebRTC directly, no IPC bridge
+WEBRTC_APPS = {
+    "0F5096E8",  # Chrome Tab Mirroring
+    "85CDB22F",  # Chrome Audio Mirroring
+}
 
 # ---------------------------------------------------------------------------
 # App Configs — loaded from the Chromecast baseconfig API
@@ -290,6 +298,11 @@ class CastReceiver:
         # Messages that arrived before the SDK connected — flushed on_sdk_ready
         self._ipc_pending: list = []  # list of (namespace, source_id, payload_utf8)
 
+        # WebRTC session (Chrome Tab / Audio Mirroring)
+        self._webrtc_session: CastWebRTCSession | None = None
+        self._webrtc_sock = None          # Cast V2 socket for signaling back to Chrome
+        self._webrtc_sender_id: str = ""  # Chrome's Cast source_id
+
         # Optional Electron media bridge
         self.bridge = media_bridge
 
@@ -483,6 +496,10 @@ class CastReceiver:
                     self._ipc_pending.append((ns, msg.source_id, msg.payload_utf8))
             else:
                 self._handle_media(sock, msg, payload)
+        elif ns == NS_WEBRTC:
+            payload = json.loads(msg.payload_utf8)
+            log.info("[%s] << WEBRTC: %s", client_id, payload.get("type"))
+            self._handle_webrtc(sock, msg, payload)
         elif ns == NS_SETUP:
             payload = json.loads(msg.payload_utf8)
             log.info("[%s] << SETUP: %s", client_id, payload.get("type"))
@@ -698,16 +715,24 @@ class CastReceiver:
             )
             self._send_message(sock, response)
             log.info("  >> RECEIVER_STATUS with launched app (transport=%s)", transport_id)
-            # For IPC apps, load the page in
-            # Electron and wire the IPC bridge.
-            self._launch_ipc_app(app_id, launching_sender_id=msg.source_id)
+            if app_id in WEBRTC_APPS:
+                # Chrome Tab/Audio Mirroring: no IPC bridge, WebRTC handles everything
+                self._launch_webrtc_app(app_id, sock)
+            elif _fetch_app_metadata(app_id).get("url"):
+                # IPC app with a known receiver URL
+                self._launch_ipc_app(app_id, launching_sender_id=msg.source_id)
+            else:
+                log.info("  No URL for app %s — running as bare Cast app", app_id)
 
         elif msg_type == "STOP":
             app_session_id = payload.get("sessionId")
             # Only stop if it matches the active session
             if app_session_id and self.applications and \
                self.applications[0].get("sessionId") == app_session_id:
-                if self.applications[0].get("appId", "") in APP_CONFIGS:
+                current_app_id = self.applications[0].get("appId", "")
+                if current_app_id in WEBRTC_APPS:
+                    self._stop_webrtc_app()
+                elif current_app_id in APP_CONFIGS:
                     self._stop_ipc_app()
                 self.applications = []
                 self.media_status = None
@@ -762,9 +787,99 @@ class CastReceiver:
 
     def _is_ipc_app(self, app_id: str) -> bool:
         """Return True if this app uses the /v2/ipc WebSocket channel."""
-        return app_id in APP_CONFIGS
+        return app_id in APP_CONFIGS and app_id not in WEBRTC_APPS
 
-    def _launch_ipc_app(self, app_id: str, launching_sender_id: str = ""):
+    def _is_webrtc_app(self, app_id: str) -> bool:
+        """Return True if this app uses Chrome Tab/Audio Mirroring via WebRTC."""
+        return app_id in WEBRTC_APPS
+
+    def _launch_webrtc_app(self, app_id: str, sock):
+        """Set up a WebRTC session for Chrome Tab/Audio Mirroring."""
+        is_audio_only = (app_id == "85CDB22F")
+        self._webrtc_sock = sock
+        self._webrtc_sender_id = ""   # filled in on first WEBRTC message
+
+        def send_fn(data: dict):
+            """Send a WebRTC signaling message back to Chrome via Cast V2."""
+            s = self._webrtc_sock
+            target = self._webrtc_sender_id
+            if not s or not target:
+                return
+            reply = self._build_message(
+                self.media_transport_id, target, NS_WEBRTC,
+                payload_utf8=json.dumps(data),
+            )
+            self._send_message(s, reply)
+
+        frame_cb = self.bridge.send_mirror_frame if (self.bridge and not is_audio_only) else None
+
+        try:
+            self._webrtc_session = CastWebRTCSession(
+                send_fn=send_fn,
+                is_audio_only=is_audio_only,
+                frame_callback=frame_cb,
+            )
+            log.info("[WebRTC] Session created for app %s (audio_only=%s)",
+                     app_id, is_audio_only)
+            if self.bridge:
+                self.bridge.start_mirror()
+        except RuntimeError as exc:
+            log.error("[WebRTC] Cannot create session: %s", exc)
+
+    def _stop_webrtc_app(self):
+        """Tear down the active WebRTC session."""
+        if self._webrtc_session:
+            self._webrtc_session.close()
+            self._webrtc_session = None
+        self._webrtc_sock = None
+        self._webrtc_sender_id = ""
+        if self.bridge:
+            self.bridge.stop_mirror()
+        log.info("[WebRTC] Session stopped")
+
+    def _handle_webrtc(self, sock, msg, payload):
+        """Handle urn:x-cast:com.google.cast.webrtc messages from Chrome."""
+        if not self._webrtc_session:
+            log.warning("[WebRTC] Message received but no session active — ignoring")
+            return
+        # Keep the signaling socket and sender ID up-to-date
+        self._webrtc_sock = sock
+        self._webrtc_sender_id = msg.source_id
+
+        msg_type = payload.get("type", "")
+        seq_num  = payload.get("seqNum", 0)
+
+        if msg_type == "OFFER":
+            offer = payload.get("offer", {})
+            streams = offer.get("supportedStreams", [])
+            log.info("[CastStream] OFFER received (seq=%d, streams=%d)",
+                     seq_num, len(streams))
+            self._webrtc_session.handle_offer(offer, seq_num)
+
+        elif msg_type == "GET_CAPABILITIES":
+            # Respond with an empty capabilities dict so Chrome continues
+            send_fn = getattr(self._webrtc_session, "_send_fn", None)
+            if send_fn:
+                send_fn({"type": "GET_CAPABILITIES_RESPONSE",
+                         "seqNum": seq_num,
+                         "result": "ok",
+                         "remoteCapabilities": {
+                             "video": {"supportedCodecs": ["vp8", "vp9", "h264"]},
+                             "audio": {"supportedCodecs": ["opus", "aac"]},
+                         }})
+            log.info("[CastStream] GET_CAPABILITIES_RESPONSE sent")
+
+        elif msg_type == "ICE_CANDIDATE":
+            # Cast Streaming does not use ICE — ignore silently
+            log.debug("[CastStream] ICE_CANDIDATE ignored (not used in Cast Streaming)")
+
+        elif msg_type == "STATUS_REQUEST":
+            self._webrtc_session.handle_status_request(seq_num)
+
+        else:
+            log.debug("[CastStream] Unhandled msg type: %s", msg_type)
+
+    def _launch_ipc_app(self, app_id: str, launching_sender_id: str):
         """Load the receiver URL in Electron and wire the IPC bridge callbacks."""
         url = _fetch_app_metadata(app_id).get("url", "")
         if self.bridge:

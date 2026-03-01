@@ -67,14 +67,27 @@
             background: #4caf50;
         }
 
-        /* Cast SDK receiver app (webview, shown over everything else) */
+        /* Cast SDK receiver app */
         #cast-webview {
             position: absolute;
             inset: 0;
             width: 100%;
             height: 100%;
             opacity: 0;
-            z-index: 10;
+        }
+
+        /* Chrome Tab Mirroring — sits after the iframe in DOM so it paints on top */
+        #mirror-canvas {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            display: none;
+            background: #000;
+            /* JS sets style.width/height to letterbox-fit the window on every
+               resize. The GPU compositor then scales the drawing buffer pixels
+               (video resolution) to those CSS pixels using Lanczos filtering. */
+            image-rendering: high-quality;
         }
     </style>
 </head>
@@ -96,6 +109,7 @@
          before any page scripts execute. -->
     <iframe id="cast-webview" src="about:blank" frameborder="0" allow="autoplay; encrypted-media; fullscreen">
     </iframe>
+    <canvas id="mirror-canvas"></canvas>
     <script src="renderer.js"></script>
 </body>
 

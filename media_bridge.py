@@ -41,6 +41,13 @@ class MediaBridge:
         self._loop: asyncio.AbstractEventLoop = None
         self._thread: threading.Thread = None
         self._ready = threading.Event()
+        # Video frame slot: only the latest frame is kept; sending is
+        # serialised so at most one ws.send() is in flight at any time.
+        # This prevents the asyncio event loop from accumulating a backlog
+        # of large binary sends (memory leak + latency).
+        self._video_latest: object = None   # bytes or None
+        self._video_lock   = threading.Lock()
+        self._video_sending: bool = False   # accessed only from asyncio thread
 
     # ------------------------------------------------------------------ #
     #  Public API (called from receiver thread)                            #
@@ -101,6 +108,60 @@ class MediaBridge:
     def on_volume(self, level: float, muted: bool):
         self.send({"event": "volume", "level": level, "muted": muted})
 
+    def start_mirror(self):
+        """Tell Electron to show the mirror canvas."""
+        self.send({"event": "start-mirror"})
+
+    def stop_mirror(self):
+        """Tell Electron to hide the mirror canvas."""
+        self.send({"event": "stop-mirror"})
+
+    def send_mirror_frame(self, frame_data: bytes):
+        """Push a raw video frame to the Electron mirror canvas.
+
+        frame_data: binary-framed RGBA buffer (uint32be width, uint32be height,
+        then tight-packed RGBA pixels) produced by webrtc_handler._decode_video.
+
+        Only one ws.send() is ever in flight at a time.  If a new frame arrives
+        while the previous send is still running, the previous pending frame is
+        discarded (latest-wins), preventing queue growth and memory leaks.
+        """
+        if not _HAS_WEBSOCKETS or not self._loop:
+            return
+        with self._video_lock:
+            self._video_latest = frame_data          # overwrite any waiting frame
+        self._loop.call_soon_threadsafe(self._drain_video)
+
+    def _drain_video(self):
+        """Called from asyncio thread via call_soon_threadsafe.
+        Starts a send if none is in flight; otherwise the in-flight send
+        will pick up the latest frame itself when it completes.
+        """
+        if self._video_sending:
+            return  # _do_send_video will re-drain on completion
+        with self._video_lock:
+            data = self._video_latest
+            self._video_latest = None
+        if data:
+            self._video_sending = True
+            self._loop.create_task(self._do_send_video(data))
+
+    async def _do_send_video(self, data: bytes):
+        """Send one frame then immediately drain any frame that arrived
+        while the send was in progress — ensuring zero backlog."""
+        try:
+            await self._broadcast_binary(data)
+        finally:
+            # Check for a frame that arrived while we were sending
+            with self._video_lock:
+                next_data = self._video_latest
+                self._video_latest = None
+            if next_data:
+                # Keep _video_sending=True and send the next frame
+                self._loop.create_task(self._do_send_video(next_data))
+            else:
+                self._video_sending = False
+
     def load_url(self, url: str):
         """Tell Electron to open the Cast receiver app in a new window."""
         self.send({"event": "load-url", "url": url})
@@ -141,6 +202,16 @@ class MediaBridge:
         for ws in list(self._clients):
             try:
                 await ws.send(message)
+            except websockets.ConnectionClosed:
+                dead.add(ws)
+        self._clients -= dead
+
+    async def _broadcast_binary(self, data: bytes):
+        """Broadcast a binary WebSocket frame (raw bytes, no JSON wrapping)."""
+        dead = set()
+        for ws in list(self._clients):
+            try:
+                await ws.send(data)
             except websockets.ConnectionClosed:
                 dead.add(ws)
         self._clients -= dead

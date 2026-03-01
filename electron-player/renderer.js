@@ -8,6 +8,8 @@ const WS_URL = `ws://localhost:${BRIDGE_PORT}`;
 const idle = document.getElementById('idle');
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
+const mirrorCanvas = document.getElementById('mirror-canvas');
+const mirrorCtx = mirrorCanvas.getContext('2d');
 
 // ── State ──────────────────────────────────────────────────────────────────────
 const castWebview = document.getElementById('cast-webview');
@@ -22,14 +24,58 @@ const castWebview = document.getElementById('cast-webview');
 function showIdle() {
     castWebview.src = 'about:blank';
     castWebview.style.opacity = '0';
+    mirrorCanvas.style.display = 'none';
     idle.classList.remove('hidden');
     window.castBridge.setTitle('');
 }
 
 function showReceiver(url) {
     idle.classList.add('hidden');
+    mirrorCanvas.style.display = 'none';
     castWebview.src = url;
     castWebview.style.opacity = '1';
+}
+
+// Set canvas drawing buffer to the video's native resolution, then
+// compute and apply a letterbox-fit CSS display size so the canvas
+// always fills the window while preserving aspect ratio.
+// The GPU compositor scales drawing-buffer → CSS pixels (Lanczos),
+// which is sharper than any software upscale inside drawImage().
+function setMirrorCanvasToVideoSize(fw, fh) {
+    if (mirrorCanvas.width !== fw || mirrorCanvas.height !== fh) {
+        mirrorCanvas.width = fw;
+        mirrorCanvas.height = fh;
+        mirrorCtx.imageSmoothingEnabled = true;
+        mirrorCtx.imageSmoothingQuality = 'high';
+    }
+    fitMirrorCanvas();
+}
+
+// Recompute the CSS display size to letterbox-fit the current window.
+function fitMirrorCanvas() {
+    const fw = mirrorCanvas.width;
+    const fh = mirrorCanvas.height;
+    if (!fw || !fh) return;
+    const scale = Math.min(window.innerWidth / fw, window.innerHeight / fh);
+    mirrorCanvas.style.width = Math.round(fw * scale) + 'px';
+    mirrorCanvas.style.height = Math.round(fh * scale) + 'px';
+}
+
+window.addEventListener('resize', () => {
+    if (mirrorCanvas.style.display === 'block') fitMirrorCanvas();
+});
+
+function showMirror() {
+    idle.classList.add('hidden');
+    castWebview.src = 'about:blank';
+    castWebview.style.opacity = '0';
+    mirrorCanvas.style.display = 'block';
+    // Canvas size is set when the first frame arrives (video native resolution).
+}
+
+function hideMirror() {
+    mirrorCanvas.style.display = 'none';
+    idle.classList.remove('hidden');
 }
 
 function setConnected(yes) {
@@ -39,6 +85,15 @@ function setConnected(yes) {
 
 // ── Cast event handlers ───────────────────────────────────────────────────────
 const handlers = {
+    // Chrome Tab Mirroring — display WebRTC frames on canvas
+    'start-mirror'() {
+        showMirror();
+    },
+
+    'stop-mirror'() {
+        hideMirror();
+    },
+
     // IPC receiver apps (CC1AD845, etc.) — content rendered inside the <webview>
     'load-url'({ url }) {
         /*if (url.includes('www.gstatic.com/cast/sdk/default_receiver/')) {
@@ -67,7 +122,30 @@ function connect() {
         clearTimeout(reconnectTimer);
     };
 
+    ws.binaryType = 'arraybuffer';
+
     ws.onmessage = ({ data }) => {
+        // Binary message = JPEG-encoded video frame (raw JPEG file bytes).
+        // createImageBitmap decodes via Chromium's GPU JPEG pipeline.
+        if (data instanceof ArrayBuffer) {
+            if (mirrorCanvas.style.display !== 'block') return;
+            if (!mirrorCanvas._frameCount) mirrorCanvas._frameCount = 0;
+            mirrorCanvas._frameCount++;
+            createImageBitmap(new Blob([data], { type: 'image/jpeg' })).then(bitmap => {
+                const bw = bitmap.width, bh = bitmap.height;
+                setMirrorCanvasToVideoSize(bw, bh);
+                mirrorCtx.drawImage(bitmap, 0, 0);
+                bitmap.close();
+                if (mirrorCanvas._frameCount === 1) {
+                    console.log('[Mirror] First JPEG frame:', bw + 'x' + bh);
+                }
+            }).catch(e => {
+                if (mirrorCanvas._frameCount <= 3) console.error('[Mirror] JPEG decode error:', e);
+            });
+            return;
+        }
+
+        // Text message = JSON event
         let event;
         try { event = JSON.parse(data); } catch { return; }
         const handler = handlers[event.event];
