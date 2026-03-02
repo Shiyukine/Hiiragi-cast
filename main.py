@@ -1,12 +1,6 @@
 """
-Cast V2 Test Runner
+Cast V2 Main
 Starts both the mDNS advertiser and the Cast V2 TLS receiver.
-
-Usage:
-    python run.py                              # Use default cert/key paths
-    python run.py --name "My Chromecast"       # Custom device name
-    python run.py --cert path/to/cert.pem --key path/to/key.pem
-    python run.py --no-mdns                    # Skip mDNS (manual testing only)
 """
 
 import argparse
@@ -35,20 +29,19 @@ log = logging.getLogger("Hiiragi Cast")
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Cast V2 Receiver Test - Chromecast Authentication Test",
+        description="Cast V2 Receiver",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python run.py
-  python run.py --name "Living Room TV" --port 8009
-  python run.py --cert ../AIRSCREEN.crt --key ../pk.pem --no-mdns
+  python main.py
+  python main.py --name "Living Room TV" --port 8009
+  python main.py --cert ../AIRSCREEN.crt --key ../pk.pem --no-mdns
 
 Testing:
   1. Run this script on your PC
   2. Open Chrome and look for Cast devices (three-dot menu > Cast)
   3. Your device should appear as the name you specified
-  4. If authentication succeeds, you'll see AUTH/CONNECT/HEARTBEAT in logs
-  5. You can also test with: pychromecast or catt CLI tools
+  4. If authentication succeeds, you'll see AUTH/CONNECT/GET_STATUS in logs
         """,
     )
     parser.add_argument("--cert", default="./certs/tls.pem",
