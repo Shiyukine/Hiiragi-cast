@@ -1,5 +1,3 @@
 __pycache__/
 node_modules/
-certs/
-json.txt
-namespace_cache.json
+.cache/

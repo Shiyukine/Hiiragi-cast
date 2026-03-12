@@ -63,7 +63,7 @@ WEBRTC_APPS = {
 # ---------------------------------------------------------------------------
 
 _BASECONFIG_URL   = "https://clients3.google.com/cast/chromecast/device/baseconfig"
-_BASECONFIG_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "json.txt")
+_BASECONFIG_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "json.txt")
 
 
 def _load_app_configs() -> dict:
@@ -86,6 +86,7 @@ def _load_app_configs() -> dict:
             )
             with urllib.request.urlopen(req, timeout=15) as resp:
                 raw = resp.read()
+            os.makedirs(os.path.dirname(_BASECONFIG_CACHE), exist_ok=True)
             with open(_BASECONFIG_CACHE, "wb") as fh:
                 fh.write(raw)
             log.info("APP_CONFIGS: Cached baseconfig to %s", _BASECONFIG_CACHE)
@@ -124,7 +125,7 @@ APP_CONFIGS: dict = _load_app_configs()
 # throws invalid_parameter when the receiver tries to use an unlisted namespace.
 # ---------------------------------------------------------------------------
 
-_NS_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "namespace_cache.json")
+_NS_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "namespace_cache.json")
 
 # Internal-only namespaces that should NEVER be exposed to Cast senders.
 _NS_SENDER_HIDDEN = {

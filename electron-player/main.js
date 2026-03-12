@@ -24,7 +24,7 @@ function createWindow() {
         } : {}),
         backgroundColor: '#000',
         title: 'Hiiragi Cast Player',
-        icon: path.join(__dirname, 'assets', 'icon.png'),
+        icon: path.join(__dirname, 'src', 'assets', 'icon.png'),
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -85,7 +85,7 @@ function createWindow() {
 
     // Pass the bridge port to the renderer via query param
     mainWindow.loadURL(
-        `file://${path.join(__dirname, 'index.html')}?bridgePort=${BRIDGE_PORT}`
+        `file://${path.join(__dirname, 'src', 'index.html')}?bridgePort=${BRIDGE_PORT}`
     );
 }
 

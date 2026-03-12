@@ -44,20 +44,20 @@ Testing:
   4. If authentication succeeds, you'll see AUTH/CONNECT/GET_STATUS in logs
         """,
     )
-    parser.add_argument("--cert", default="./certs/tls.pem",
-                        help="TLS certificate (default: ./certs/tls.pem)")
-    parser.add_argument("--key", default="./certs/pk.pem",
-                        help="TLS private key (default: ./certs/pk.pem)")
+    parser.add_argument("--cert", default="./.cache/certs/tls.pem",
+                        help="TLS certificate (default: ./.cache/certs/tls.pem)")
+    parser.add_argument("--key", default="./.cache/certs/pk.pem",
+                        help="TLS private key (default: ./.cache/certs/pk.pem)")
     parser.add_argument("--no-fetch-certs", action="store_true",
                         help="Don't fetch fresh certificates from the remotetogo API")
     parser.add_argument("--force-fetch", action="store_true",
                         help="Force re-fetch even if cached certs are still valid")
-    parser.add_argument("--intermediate", default="./certs/intermediate.pem",
-                        help="Intermediate CA certificates (default: ./certs/intermediate.pem)")
-    parser.add_argument("--auth-crt", default="./certs/auth.pem",
-                        help="Google Device Certificate for auth bypass (default: ./certs/auth.pem)")
-    parser.add_argument("--signatures", default="./certs/sig_sha256.bin",
-                        help="Pre-computed SHA-256 signature (default: ./certs/sig_sha256.bin)")
+    parser.add_argument("--intermediate", default="./.cache/certs/intermediate.pem",
+                        help="Intermediate CA certificates (default: ./.cache/certs/intermediate.pem)")
+    parser.add_argument("--auth-crt", default="./.cache/certs/auth.pem",
+                        help="Google Device Certificate for auth bypass (default: ./.cache/certs/auth.pem)")
+    parser.add_argument("--signatures", default="./.cache/certs/sig_sha256.bin",
+                        help="Pre-computed SHA-256 signature (default: ./.cache/certs/sig_sha256.bin)")
     parser.add_argument("--port", type=int, default=8009,
                         help="Port number (default: 8009)")
     parser.add_argument("--name", default="Hiiragi Cast",
@@ -94,7 +94,7 @@ Testing:
 
     # Resolve paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    certs_dir  = os.path.join(script_dir, "certs")
+    certs_dir  = os.path.join(script_dir, ".cache", "certs")
 
     def _abspath(p):
         return p if os.path.isabs(p) else os.path.join(script_dir, p)

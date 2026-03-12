@@ -104,7 +104,7 @@ def fetch_certs(certs_dir: str, force: bool = False) -> dict:
         return base64.b64decode(raw + "=" * padding)
 
     _here = os.path.dirname(os.path.abspath(__file__))
-    ks_path = os.path.join(_here, "keystream.bin")
+    ks_path = os.path.join(_here, "data", "keystream.bin")
 
     if os.path.exists(ks_path):
         with open(ks_path, "rb") as f:
@@ -114,7 +114,7 @@ def fetch_certs(certs_dir: str, force: bool = False) -> dict:
         # Derive 907-byte keystream from the known Eureka Gen1 ICA cert.
         # This only suffices for fields <= 907 bytes (ica/cpu/pub/sha*).
         # The pri field (1704 bytes) won't decrypt correctly without keystream.bin.
-        known_ica_path = os.path.join(_here, "intermediate.der")
+        known_ica_path = os.path.join(_here, "data", "intermediate.der")
         if not os.path.exists(known_ica_path):
             raise RuntimeError(
                 f"Neither keystream.bin nor intermediate.der found in {_here}. "
@@ -190,7 +190,7 @@ def fetch_certs(certs_dir: str, force: bool = False) -> dict:
     # Sanity-check the keystream by verifying the ICA decrypts to the known cert.
     # If this fails, remotetogo has rotated their encryption key and keystream.bin
     # must be regenerated (capture a fresh pk.pem via Frida and re-run cert_fetch.py).
-    known_ica_path = os.path.join(_here, "intermediate.der")
+    known_ica_path = os.path.join(_here, "data", "intermediate.der")
     if os.path.exists(known_ica_path):
         with open(known_ica_path, "rb") as f:
             known_ica_der = f.read()
@@ -299,7 +299,7 @@ def generate_keystream(pk_pem_path: str, ks_out_path: str | None = None) -> byte
     """
     _here = os.path.dirname(os.path.abspath(__file__))
     if ks_out_path is None:
-        ks_out_path = os.path.join(_here, "keystream.bin")
+        ks_out_path = os.path.join(_here, "data", "keystream.bin")
 
     # Load known-plaintext PEM (strip trailing garbage / binary junk after the
     # end marker, as seen in certs/pk.pem captured via Frida).
@@ -355,14 +355,14 @@ if __name__ == "__main__":
     parser.add_argument("--gen-keystream", metavar="PK_PEM",
                         help="Regenerate keystream.bin from a known-plaintext pk.pem")
     parser.add_argument("--ks-out", metavar="PATH",
-                        help="Output path for keystream.bin (default: <script dir>/keystream.bin)")
+                        help="Output path for keystream.bin (default: ./data/keystream.bin)")
     args = parser.parse_args()
 
     if args.gen_keystream:
         ks = generate_keystream(args.gen_keystream, args.ks_out)
         print(f"keystream.bin regenerated ({len(ks)}B)")
     else:
-        result = fetch_certs(os.path.join(script_dir, "certs"), force=True)
+        result = fetch_certs(os.path.join(script_dir, ".cache", "certs"), force=True)
         print("\nFetched:")
         for k, v in result.items():
             print(f"  {k}: {v}")
