@@ -59,4 +59,7 @@ if __name__ == "__main__":
 
         os.chdir(current_dir)
 
+    if sys.platform == "linux":
+        os.system(f"pkexec apt-get install libportaudio2")
+
     os.system(f"{sys.executable} main.py")

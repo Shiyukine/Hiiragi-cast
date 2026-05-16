@@ -5,7 +5,7 @@
     "main": "main.js",
     "scripts": {
         "start": "electron .",
-        "startFix": "unset CHROME_DESKTOP && electron .",
+        "startFix": "unset CHROME_DESKTOP && electron . --ozone-platform=x11",
         "startFixMac": "cd node_modules/electron && rm -r dist && npm run postinstall && cd ../.. && electron .",
         "signWin": "py -m castlabs_evs.vmp sign-pkg .\\node_modules\\electron\\dist"
     },
