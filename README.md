@@ -6,8 +6,13 @@ This app uses [CastReceiver](https://play.google.com/store/apps/details?id=com.s
 
 ## How to use
 1. Install [Python 3](https://www.python.org/downloads/) and [Node.js](https://nodejs.org/en/download/)
-2. Use the command `python setup.py` to install the required Python packages, nodejs packages, setup EVS.
-3. Use the command `python main.py` to restart the receiver after setup.
+2. Clone this repository: 
+```bash
+git clone https://github.com/Shiyukine/Hiiragi-cast
+cd Hiiragi-cast
+```
+3. Use the command `python setup.py` to install the required Python packages, nodejs packages, setup EVS.
+4. Use the command `python main.py` to restart the receiver after setup.
 
 ## What is working and not working
 - Working:
