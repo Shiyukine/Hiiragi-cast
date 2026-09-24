@@ -127,7 +127,7 @@ class CastIpcBridge:
             "data": data,
         }))
 
-    def send_sender_connected(self, sender_id: str, user_agent: str = "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 CrKey/1.56.467165"):
+    def send_sender_connected(self, sender_id: str, user_agent: str = "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.65 Safari/537.36 CrKey/1.56.469779"):
         """Notify the SDK that a new Cast sender connected."""
         self._sys_send({
             "type": "senderconnected",

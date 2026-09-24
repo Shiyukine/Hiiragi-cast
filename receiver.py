@@ -80,9 +80,7 @@ def _load_app_configs() -> dict:
         try:
             req = urllib.request.Request(
                 _BASECONFIG_URL,
-                headers={"User-Agent": "Mozilla/5.0 (CrKey armv7l 1.56.500000) "
-                                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                       "Chrome/56.0.2924.41 Safari/537.36 CrKey/1.56.500000"},
+                headers={"User-Agent": "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.65 Safari/537.36 CrKey/1.56.469779"},
             )
             with urllib.request.urlopen(req, timeout=15) as resp:
                 raw = resp.read()
@@ -189,9 +187,7 @@ def _fetch_app_metadata(app_id: str) -> dict:
     try:
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "Mozilla/5.0 (CrKey armv7l 1.56.500000) "
-                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                   "Chrome/56.0.2924.41 Safari/537.36 CrKey/1.56.500000"},
+            headers={"User-Agent": "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.65 Safari/537.36 CrKey/1.56.469779"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.readline()  # skip XSSI prefix

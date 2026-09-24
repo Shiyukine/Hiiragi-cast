@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, webFrameMain } = require('electron');
 app.commandLine.appendSwitch('disable-site-isolation-trials')
 const path = require('path');
-app.userAgentFallback = "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 CrKey/1.56.467165";
+app.userAgentFallback = "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7977.65 Safari/537.36 CrKey/1.56.469779";
 
 // Default bridge WebSocket port (must match --bridge-port in run.py)
 const BRIDGE_PORT = process.env.BRIDGE_PORT || 9000;
@@ -50,6 +50,21 @@ function createWindow() {
                 display: none;
             }`
             );
+        }
+    });
+
+    mainWindow.webContents.on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => {
+        if (url.includes('https://www.gstatic.com/cast/sdk/')) {
+            try {
+                const script = `(() => {
+                    navigator.__defineGetter__('userAgent', function() {
+                        return "${app.userAgentFallback.split('CrKey/1.56.469779').join("")}";
+                    });
+                })();`;
+                webFrameMain.fromId(frameProcessId, frameRoutingId).executeJavaScript(script);
+            } catch (e) {
+                console.warn('[Youtube inject] YouTube quality injection failed:', e);
+            }
         }
     });
 
