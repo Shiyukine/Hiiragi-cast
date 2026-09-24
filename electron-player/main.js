@@ -53,6 +53,7 @@ function createWindow() {
         }
     });
 
+    // shaka player needs to have a proper user agent to play some streams, so we override it for the cast SDK frames
     mainWindow.webContents.on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => {
         if (url.includes('https://www.gstatic.com/cast/sdk/')) {
             try {
@@ -63,7 +64,7 @@ function createWindow() {
                 })();`;
                 webFrameMain.fromId(frameProcessId, frameRoutingId).executeJavaScript(script);
             } catch (e) {
-                console.warn('[Youtube inject] YouTube quality injection failed:', e);
+                console.warn('User agent injection failed:', e);
             }
         }
     });
