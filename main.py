@@ -166,7 +166,7 @@ Testing:
             if sys.platform == "linux" or sys.platform == "linux2": # Linux
                 electron_cmd = "npm run startFix"
             if sys.platform == "darwin": # macOS
-                electron_cmd = "npm run startFixMac"
+                electron_cmd = "npm run startFixMac || npm run start" # npm run startFixMac is not working on macOS 27. npm run start is a fallback if the other is not working.
             electron_proc = subprocess.Popen(
                 electron_cmd,
                 cwd=electron_dir,

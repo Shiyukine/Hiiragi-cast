@@ -14,6 +14,6 @@
         "dashjs": "^4.7.4"
     },
     "devDependencies": {
-        "electron": "github:castlabs/electron-releases#v39.2.4+wvcus"
+        "electron": "github:castlabs/electron-releases#v44.1.0+wvcus"
     }
 }
