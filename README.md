@@ -1,6 +1,6 @@
 # Hiiragi-cast
 
-A Python & Electron implementation of a Chromecast receiver.
+A Python & Electron implementation of a Chromecast receiver. Works on Windows, macOS and Linux (Debian & arch).
 
 This app uses [CastReceiver](https://play.google.com/store/apps/details?id=com.softmedia.receiver.castapp&hl=en_US) as a base and create a new receiver with a custom UI and additional features.
 
