@@ -11,7 +11,7 @@ STAT_0o775 = ( stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
 
 if __name__ == "__main__":
     os.system(f"{sys.executable} -m pip install -r requirements.txt")
-    os.system(f"cd electron-player && npm install")
+    os.system(f"cd electron-player && npm install && npx install-electron --no")
 
     if sys.platform == "win32" or sys.platform == "darwin":
         print("="*90)
